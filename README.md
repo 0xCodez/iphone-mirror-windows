@@ -90,14 +90,16 @@ Move the mouse over the window to show the **top bar**. From left to right it ha
 
 ### With control on
 
-These apply once control is **ready** (green Control button).
+These apply once control is **ready** (green Control button) and the iPhone screen is shown.
+While the window shows a placeholder instead of the iPhone screen, dragging still moves the
+window.
 
 | Action on the phone area | What the iPhone gets |
 |---|---|
-| Click | Tap |
+| Click | Tap. It is sent about 0.2 s after the click, in case a second click makes it a double tap |
 | Press and hold for 0.5 s or longer without moving | Long press |
 | Drag | Swipe. It is sent when you release the button and lasts as long as your drag did (clamped to 0.06 - 1.5 s) |
-| Double-click | Double tap |
+| Double-click | Double tap (both taps are sent together, so apps see a real double tap) |
 | Mouse wheel | Scroll. Wheel steps are collected for about 120 ms and sent as one scroll |
 | Typing | Text input. Characters are buffered for about 80 ms; Backspace and Enter work |
 | Drag the top bar, or Alt + drag anywhere | Move the window |
@@ -118,7 +120,11 @@ line from its start to its end.
 | Ctrl + Plus / Ctrl + Minus | Resize the window |
 
 Home, App Switcher and iPhone volume act on the phone, so they only do something while
-control is ready.
+control is ready. App Switcher swipes up from the bottom edge and holds on iPhones with
+Face ID, and double-presses Home on iPhones with a Home button.
+
+Ctrl + mouse wheel resizes in proportion to how far the wheel turns (about 6% per notch), so
+smooth scrolling with a touchpad resizes smoothly too.
 
 ### Right-click menu
 
@@ -145,8 +151,10 @@ AirPlay only carries picture and sound. To send taps and keystrokes back, iPhone
 talks to [WebDriverAgent](https://github.com/appium/WebDriverAgent) (WDA), Appium's
 open-source automation server built on Apple's XCUITest, which runs as a small app on the
 phone. iPhone Mirror starts it over USB with
-[pymobiledevice3](https://github.com/doronz88/pymobiledevice3). No administrator rights are
-needed, and no Mac.
+[pymobiledevice3](https://github.com/doronz88/pymobiledevice3). No Mac is needed, and on
+iOS 17.4 or later (and on iOS 16 or earlier) no administrator rights either. iOS 17.0 - 17.3
+can only be controlled with administrator rights: update the iPhone, or run
+`pymobiledevice3 remote tunneld` as administrator before you turn control on.
 
 The commands below run in a terminal (Command Prompt or PowerShell) opened in the repository
 folder. `control.bat` runs the helper with the app's own Python environment, so nothing has
@@ -199,6 +207,23 @@ starts a new one over USB if it finds none. So once WDA is up, control traffic c
 Wi-Fi too. Keep the cable connected anyway while you work: WDA lives only as long as the test
 session that launched it, and unplugging the cable usually ends that session.
 
+### Helper commands
+
+`control.bat COMMAND` (or `python -m iphone_mirror.control COMMAND`; add `--help` to any
+command for its options):
+
+| Command | What it does |
+|---|---|
+| `doctor` | Check everything USB control needs (`--ip ADDRESS` also checks WDA over Wi-Fi) |
+| `reveal-dev-mode` | Make the Developer Mode switch appear in the iPhone's Settings |
+| `get-wda` | Download WebDriverAgent as `WebDriverAgentRunner.ipa` (`--out PATH` to save it elsewhere) |
+| `start` | Start WebDriverAgent over USB without the app and keep it running until Ctrl+C |
+| `tap X Y` | Tap at X, Y (in points) on a running WDA |
+| `home` | Go to the Home Screen |
+| `type TEXT` | Type TEXT into the focused field (`\n` = Return, `\b` = Backspace) |
+
+`tap`, `home` and `type` talk to `http://127.0.0.1:8100` unless you pass `--url`.
+
 ## Troubleshooting
 
 **The PC does not appear under Screen Mirroring**
@@ -245,7 +270,8 @@ plays to the right output device. The iPhone's own volume buttons also control t
   `%LOCALAPPDATA%\iPhoneMirror\settings.json` and start it again. If the iPhone stops
   connecting, change it back to `1080`.
 - **Control latency.** Every action is an HTTP request to WebDriverAgent, so expect about
-  100-200 ms before the iPhone reacts.
+  100-200 ms before the iPhone reacts. A single click waits about 0.2 s more, to tell it
+  from a double-click.
 - **No live drag.** Swipes are sent when you release the mouse button, so you cannot drag
   an item and watch it follow the pointer, or draw.
 - **Control needs setup.** It requires a cable, Developer Mode and a sideloaded WDA that

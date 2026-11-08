@@ -45,9 +45,15 @@ DEFAULT_ASPECT = 1179 / 2556  # iPhone portrait
 LONG_PRESS_S = 0.5  # hold at least this long without moving = long press
 TAP_SLOP = 6.0  # px the mouse may move before a press becomes a swipe
 SWIPE_MIN_S, SWIPE_MAX_S = 0.06, 1.5  # swipe duration = real drag time, clamped
+DOUBLE_TAP_MS = 200  # a click is held back this long in case a second click makes it a double tap
 WHEEL_BATCH_MS = 120  # wheel notches are summed for this long, then sent as one scroll
 TYPE_BATCH_MS = 80  # typed characters are buffered for this long, then sent together
 HINT_S = 2.6  # how long a status hint stays in the top bar
+
+# Ctrl+wheel resizing: per 120 units of wheel delta (one notch). Touchpad pinches and smooth
+# scrolling send many small deltas, which are summed and applied at most every ZOOM_MS.
+ZOOM_PER_NOTCH = 1.06
+ZOOM_MS = 30
 
 # Windows virtual-key codes: shortcuts must also work with non-Latin keyboard layouts
 VK_H, VK_J, VK_M, VK_U = 0x48, 0x4A, 0x4D, 0x55
@@ -145,13 +151,19 @@ class PhoneWindow(QWidget):
         self._hover_btn = None
         self._hint_text = ""
         self._hint_until = 0.0
+        self._zoom_acc = 0  # Ctrl+wheel delta not applied yet
+        self._zoom_timer = QTimer(self, singleShot=True, interval=ZOOM_MS, timeout=self._apply_zoom)
 
         # iPhone control
-        self.control_state = OFF  # last state delivered through on_control (GUI thread)
+        self.control_state = OFF  # controller state as of the last on_control (GUI thread)
         self.control_message = ""
+        self._control_serial = 0  # Controller.snapshot() serial of the shown state
+        self._error_serial = None  # serial of the last error shown in a message box
         self._error_box = None
-        self._g = None  # gesture in progress: dict(pos0, pos, t0, moved, done)
+        self._g = None  # gesture in progress: dict(pos0, pos, t0, moved, done, double)
         self._long_timer = QTimer(self, singleShot=True, interval=int(LONG_PRESS_S * 1000), timeout=self._on_long_press)
+        self._pending_tap = None  # (x, y) fractions of a click that may still become a double tap
+        self._tap_timer = QTimer(self, singleShot=True, interval=DOUBLE_TAP_MS, timeout=self._flush_tap)
         self._wheel_acc = 0.0
         self._wheel_pos = (0.5, 0.5)
         self._wheel_timer = QTimer(self, singleShot=True, interval=WHEEL_BATCH_MS, timeout=self._flush_wheel)
@@ -240,6 +252,8 @@ class PhoneWindow(QWidget):
         aspect = src_w / src_h
         if self.src_size != (src_w, src_h):
             self.src_size = (src_w, src_h)
+            if self.ctrl is not None:
+                self.ctrl.screen_aspect = aspect  # lets the controller notice a rotation at once
             if abs(aspect - self.aspect) > 0.01:
                 self.aspect = aspect
                 self._relayout()
@@ -274,6 +288,9 @@ class PhoneWindow(QWidget):
             self.image = None
             self._array = None
             self.src_size = None
+            if self.ctrl is not None:
+                self.ctrl.screen_aspect = None
+            self._drop_tap()  # the screen it was aimed at is gone
             self._cancel_gesture()
             if abs(self.aspect - DEFAULT_ASPECT) > 0.01:
                 self.aspect = DEFAULT_ASPECT
@@ -286,16 +303,29 @@ class PhoneWindow(QWidget):
         self.update()
 
     def on_control(self, state, message):
-        """Controller state change; connected through Bridge.control, so this runs on the GUI thread."""
+        """Controller state change; connected through Bridge.control, so this runs on the GUI thread.
+
+        Notifications from the control thread are queued, while stop() on the GUI thread
+        notifies directly, so they can arrive out of order. The arguments are therefore only
+        a wake-up call: the controller's current state is what gets shown."""
+        if self.ctrl is not None:
+            state, message, serial = self.ctrl.snapshot()
+        else:
+            serial = self._control_serial + 1
+        message = message or ""
         changed = (state, message) != (self.control_state, self.control_message)
-        self.control_state, self.control_message = state, message or ""
+        new_error = state == ERROR and serial != self._error_serial  # each failure once, also a repeated one
+        self.control_state, self.control_message = state, message
+        self._control_serial = serial
         if state != READY:
+            self._drop_tap()
             self._cancel_gesture()
             self._type_buf = ""
             self._wheel_acc = 0.0
-        if state == ERROR and changed:
+        if new_error:
+            self._error_serial = serial
             self._show_control_error(self.control_message or "iPhone control failed.")
-        if changed:
+        if changed or new_error:
             self._hint_text = ""  # the new control status replaces any older hint
             self._flash_bar()
         self._update_anim()
@@ -659,7 +689,7 @@ class PhoneWindow(QWidget):
     def _toggle_control(self):
         if self.ctrl is None:
             self._hint("iPhone control is not available")
-        elif self.control_state in (STARTING, READY):
+        elif self.ctrl.active:  # the controller's own state: the shown one may lag behind
             self.ctrl.stop()
         else:
             self.ctrl.start()
@@ -674,22 +704,44 @@ class PhoneWindow(QWidget):
             else:
                 self._hint("Turn on iPhone control first (Ctrl+U)")
             return
+        self._flush_tap()
         getattr(self.ctrl, method)(*args)
 
-    def _gesture_begin(self, pos):
-        self._g = {"pos0": QPointF(pos), "pos": QPointF(pos), "t0": time.monotonic(), "moved": False, "done": False}
+    def _gesture_begin(self, pos, double=False):
+        self._g = {
+            "pos0": QPointF(pos),
+            "pos": QPointF(pos),
+            "t0": time.monotonic(),
+            "moved": False,
+            "done": False,
+            "double": double,  # second press of a double-click whose first click is still held back
+        }
         self._long_timer.start()
         self.update()
 
     def _cancel_gesture(self):
         self._g = None
         self._long_timer.stop()
+        if self._pending_tap is not None and not self._tap_timer.isActive():
+            self._flush_tap()  # its double-click will not complete now
+
+    def _flush_tap(self):
+        """Send the held-back click as a single tap (no second click came in time)."""
+        self._tap_timer.stop()
+        a, self._pending_tap = self._pending_tap, None
+        if a is not None and self._control_ready():
+            self.ctrl.tap(*a)
+
+    def _drop_tap(self):
+        self._tap_timer.stop()
+        self._pending_tap = None
 
     def _on_long_press(self):
         g = self._g
         if g is None or g["moved"] or g["done"] or not self._control_ready():
             return
         g["done"] = True
+        self._flush_tap()  # a click before this press stays a tap of its own
         a = to_fraction(self.phone_rect(), g["pos0"])
         self.ctrl.long_press(*a)
         self._add_effect("long", a)
@@ -697,26 +749,41 @@ class PhoneWindow(QWidget):
     def _gesture_end(self, pos):
         g, self._g = self._g, None
         self._long_timer.stop()
-        if g["done"] or not self._control_ready():
+        if not self._control_ready():
+            self._drop_tap()
+            self.update()
+            return
+        if g["done"]:
             self.update()
             return
         rect = self.phone_rect()
         a = to_fraction(rect, g["pos0"])
         held = time.monotonic() - g["t0"]
         if g["moved"]:
+            self._flush_tap()
             b = to_fraction(rect, pos)
             self.ctrl.swipe(a[0], a[1], b[0], b[1], swipe_seconds(held))
             self._add_effect("swipe", a, b)
         elif held >= LONG_PRESS_S:  # the timer did not get to run (busy event loop)
+            self._flush_tap()
             self.ctrl.long_press(*a)
             self._add_effect("long", a)
+        elif g["double"] and self._pending_tap is not None:
+            first = self._pending_tap
+            self._drop_tap()
+            self.ctrl.double_tap(*first)  # both taps in one go, at the first click's position
+            self._add_effect("tap", first)
         else:
-            self.ctrl.tap(*a)
+            # hold the tap back briefly: a second click turns it into a double tap
+            self._flush_tap()
+            self._pending_tap = a
+            self._tap_timer.start()
             self._add_effect("tap", a)
 
     def _flush_wheel(self):
         n, self._wheel_acc = self._wheel_acc, 0.0
         if abs(n) >= 0.05 and self._control_ready():
+            self._flush_tap()  # keep the order: a click made before the scroll goes first
             self.ctrl.scroll(self._wheel_pos[0], self._wheel_pos[1], n)
 
     def _type(self, text):
@@ -727,6 +794,7 @@ class PhoneWindow(QWidget):
     def _flush_type(self):
         text, self._type_buf = self._type_buf, ""
         if text and self._control_ready():
+            self._flush_tap()  # the click that focused a text field must arrive before the text
             self.ctrl.type_text(text)
 
     def _update_cursor(self, pos):
@@ -826,16 +894,28 @@ class PhoneWindow(QWidget):
             return  # the first click already pressed the button
         alt = bool(e.modifiers() & Qt.AltModifier)
         if self._gestures_on() and not alt and self.phone_rect().contains(pos):
-            self._gesture_begin(pos)  # second tap of a double tap (the first one was sent on release)
+            # second press of a double-click. If the first click is still held back, both are
+            # sent together as a double tap on release; if it already went out, this is a tap.
+            double = self._tap_timer.isActive()
+            self._tap_timer.stop()  # keep the first click until this press ends
+            self._gesture_begin(pos, double=double)
             return
         self._toggle_size()
+
+    def _apply_zoom(self):
+        """Resize by the Ctrl+wheel delta collected so far, then wait ZOOM_MS before the next step."""
+        dy, self._zoom_acc = self._zoom_acc, 0
+        if dy:
+            self.set_phone_height(round(self.phone_h * ZOOM_PER_NOTCH ** (dy / 120)))
+            self._zoom_timer.start()
 
     def wheelEvent(self, e):
         dy = e.angleDelta().y()
         if e.modifiers() & Qt.ControlModifier:
             if dy:
-                step = 1.06 if dy > 0 else 1 / 1.06
-                self.set_phone_height(self.phone_h * step)
+                self._zoom_acc += dy  # proportional: a touchpad pinch sends many small deltas
+                if not self._zoom_timer.isActive():
+                    self._apply_zoom()
             return
         if dy and self._gestures_on() and self.phone_rect().contains(e.position()):
             if not self._wheel_timer.isActive():

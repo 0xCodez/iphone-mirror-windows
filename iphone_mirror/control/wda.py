@@ -18,6 +18,12 @@ log = logging.getLogger(__name__)
 
 INVALID_SESSION = "invalid session id"
 
+# HID usage of the Home button (consumer page, "Menu"), for /wda/performIoHidEvent
+HID_PAGE_CONSUMER, HID_USAGE_HOME = 0x0C, 0x40
+# iPhones with a Home button have a 16:9 screen (e.g. 375 x 667 pt); Face ID iPhones are
+# about 19.5:9 (e.g. 393 x 852 pt).
+HOME_BUTTON_MAX_ASPECT = 2.0
+
 
 class WDAError(Exception):
     """A failed WDA request. `status` is the HTTP status (None if there was no answer),
@@ -200,6 +206,23 @@ class WDA:
             ]
         )
 
+    def double_tap(self, x, y, hold_ms=40, gap_ms=80):
+        """Two taps in ONE action sequence, so iOS gets them close enough together to see a
+        double tap (two separate requests are each delayed by a round trip)."""
+        x, y = round(x), round(y)
+        self._pointer(
+            [
+                {"type": "pointerMove", "duration": 0, "x": x, "y": y},
+                {"type": "pointerDown", "button": 0},
+                {"type": "pause", "duration": int(hold_ms)},
+                {"type": "pointerUp", "button": 0},
+                {"type": "pause", "duration": int(gap_ms)},
+                {"type": "pointerDown", "button": 0},
+                {"type": "pause", "duration": int(hold_ms)},
+                {"type": "pointerUp", "button": 0},
+            ]
+        )
+
     def long_press(self, x, y, hold_ms=700):
         self.tap(x, y, hold_ms)
 
@@ -220,9 +243,36 @@ class WDA:
     def home(self):
         self._request("POST", "/wda/homescreen")
 
+    def has_home_button(self):
+        """True for iPhones with a Home button (iPhone SE, 8 and older), judged by the screen shape."""
+        w, h = self.window_size()
+        return max(w, h) / min(w, h) < HOME_BUTTON_MAX_ASPECT
+
     def app_switcher(self):
+        if self.has_home_button():
+            # no gesture for it there (a swipe up from the bottom opens Control Center)
+            self.double_press_home()
+            return
         w, h = self.window_size()
         self.swipe(w / 2, h - 2, w / 2, h * 0.62, duration_ms=280, hold_end_ms=450)
+
+    def double_press_home(self):
+        """Press the Home button twice quickly (opens the App Switcher on Home-button iPhones)."""
+        try:
+            self._hid_home()
+        except WDAError as e:
+            if e.status is None:
+                raise  # no answer at all: not a missing feature
+            # older WDA builds have no performIoHidEvent: use the slower pressButton instead
+            log.info("performIoHidEvent failed (%s), double-pressing Home with pressButton", e)
+            self.press_button("home")
+            self.press_button("home")
+            return
+        self._hid_home()
+
+    def _hid_home(self):
+        body = {"page": HID_PAGE_CONSUMER, "usage": HID_USAGE_HOME, "duration": 0.005}
+        self._session("POST", "/wda/performIoHidEvent", body)
 
     def type_text(self, text: str):
         """Type into the focused field. '\\b' deletes a character, '\\n' presses Return."""

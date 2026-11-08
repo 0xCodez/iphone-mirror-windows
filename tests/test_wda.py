@@ -198,6 +198,48 @@ class WDAClientTests(unittest.TestCase):
         self.wda.swipe(1, 2, 3, 4)  # no hold: no pause step
         self.assertNotIn("pause", [s["type"] for s in self.mock.pointer_actions()[-1]["actions"]])
 
+    def test_double_tap_is_one_action_sequence(self):
+        self.wda.double_tap(100.4, 200.6)
+        acts = self.mock.pointer_actions()
+        self.assertEqual(len(acts), 1)
+        steps = acts[0]["actions"]
+        self.assertEqual(
+            [s["type"] for s in steps],
+            ["pointerMove", "pointerDown", "pause", "pointerUp", "pause", "pointerDown", "pause", "pointerUp"],
+        )
+        self.assertEqual((steps[0]["x"], steps[0]["y"]), (100, 201))
+        self.assertLess(steps[2]["duration"] + steps[4]["duration"] + steps[6]["duration"], 300)
+
+    def test_app_switcher_face_id_swipes_up_and_holds(self):
+        self.wda.app_switcher()
+        steps = self.mock.pointer_actions()[-1]["actions"]
+        self.assertEqual([s["type"] for s in steps], ["pointerMove", "pointerDown", "pointerMove", "pause", "pointerUp"])
+        self.assertEqual(steps[0]["y"], 842)  # from the bottom edge of 390x844
+        self.assertFalse(self.mock.find("POST", "/wda/performIoHidEvent"))
+
+    def test_app_switcher_home_button_double_presses_home(self):
+        self.mock.size = (375, 667)  # iPhone SE / 8
+        self.assertTrue(self.wda.has_home_button())
+        self.wda.app_switcher()
+        hid = self.mock.find("POST", "/wda/performIoHidEvent")
+        self.assertEqual([body for _, _, body in hid], [{"page": 0x0C, "usage": 0x40, "duration": 0.005}] * 2)
+        self.assertFalse(self.mock.pointer_actions())  # no swipe: it would open Control Center
+
+    def test_app_switcher_home_button_without_hid_support(self):
+        self.mock.size = (414, 736)  # iPhone 8 Plus
+        self.mock.fail["/wda/performIoHidEvent"] = (404, "unknown command")
+        self.wda.app_switcher()
+        self.assertEqual(len(self.mock.find("POST", "/wda/performIoHidEvent")), 1)
+        presses = self.mock.find("POST", "/wda/pressButton")
+        self.assertEqual([body for _, _, body in presses], [{"name": "home"}] * 2)
+        self.assertEqual(self.mock.sessions, 1)  # "unknown command" is not a lost session
+
+    def test_has_home_button(self):
+        for size, expected in (((390, 844), False), ((844, 390), False), ((320, 568), True), ((667, 375), True)):
+            self.mock.size = size
+            self.wda.window_size(refresh=True)
+            self.assertEqual(self.wda.has_home_button(), expected, size)
+
     def test_type_text(self):
         self.wda.type_text("hi\b\n")
         method, path, body = self.mock.find("POST", "/wda/keys")[-1]
@@ -378,6 +420,53 @@ class ControllerTests(unittest.TestCase):
         ctrl.tap(0.5, 0.5)  # ignored when not READY
         time.sleep(0.3)
         self.assertEqual(len(self.mock.pointer_actions()), n)
+
+    def test_double_tap(self):
+        ctrl = self.controller()
+        ctrl.start()
+        self.wait_state(ctrl, READY)
+        n = len(self.mock.pointer_actions())
+        ctrl.double_tap(0.5, 0.25)
+        steps = self.next_pointer_action(n)
+        self.assertEqual([s["type"] for s in steps].count("pointerDown"), 2)
+        self.assertEqual((steps[0]["x"], steps[0]["y"]), (195, 211))
+        time.sleep(0.2)
+        self.assertEqual(len(self.mock.pointer_actions()), n + 1)  # one request for both taps
+
+    def test_rotation_is_picked_up_before_the_idle_check(self):
+        ctrl = self.controller()
+        ctrl.screen_aspect = 390 / 844
+        ctrl.start()
+        self.wait_state(ctrl, READY)
+        n = len(self.mock.pointer_actions())
+        ctrl.tap(0.9, 0.5)
+        self.assertEqual(self.next_pointer_action(n)[0]["x"], 351)  # portrait: 0.9 * 390
+        sizes = len(self.mock.find("GET", "/window/size"))
+
+        self.mock.size = (844, 390)  # the iPhone turns to landscape ...
+        ctrl.screen_aspect = 844 / 390  # ... and so does the video
+        n = len(self.mock.pointer_actions())
+        ctrl.tap(0.9, 0.5)
+        steps = self.next_pointer_action(n)
+        self.assertEqual((steps[0]["x"], steps[0]["y"]), (760, 195))  # not clamped to the portrait size
+        self.assertEqual(len(self.mock.find("GET", "/window/size")), sizes + 1)
+
+        n = len(self.mock.pointer_actions())
+        ctrl.tap(0.1, 0.1)  # orientations agree again: the cached size is used
+        self.next_pointer_action(n)
+        self.assertEqual(len(self.mock.find("GET", "/window/size")), sizes + 1)
+
+    def test_stop_always_announces_off(self):
+        ctrl = self.controller()
+        self.assertEqual(ctrl.snapshot(), (OFF, "", 0))
+        ctrl.stop()  # already off: listeners still hear about it, to resync after a late notification
+        self.assertEqual(self.states, [(OFF, "")])
+        state, message, serial = ctrl.snapshot()
+        self.assertEqual((state, message), (OFF, ""))
+        self.assertEqual(serial, 1)
+        ctrl.start()
+        self.wait_state(ctrl, READY)
+        self.assertGreater(ctrl.snapshot()[2], serial)
 
     def test_small_wheel_deltas_accumulate(self):
         ctrl = self.controller()

@@ -7,12 +7,16 @@ commands from a queue. Positions are passed as fractions of the mirrored screen
 
     ctrl = Controller(on_state=lambda state, message: ...)  # called on the control thread
     ctrl.device_ip = "192.168.1.20"   # optional: also look for WDA on the phone's Wi-Fi address
+    ctrl.screen_aspect = 1179 / 2556  # optional: width / height of the mirrored video
     ctrl.start()                      # off -> starting -> ready (or error)
     ctrl.tap(0.5, 0.25); ctrl.scroll(0.5, 0.5, 1); ctrl.type_text("hi\\n")
     ctrl.stop()                       # -> off; also stops the USB helper processes
 
-stop() announces OFF on the calling thread. on_state is called with an internal lock
-held, so it must not block waiting for another thread (emitting a queued Qt signal is fine).
+stop() announces OFF on the calling thread (every time, even when already off). on_state
+is called with an internal lock held, so it must not block waiting for another thread
+(emitting a queued Qt signal is fine). Notifications from the control thread can arrive
+late at a listener that queues them: a listener should read snapshot() rather than trust
+the arguments of an old notification.
 """
 import collections
 import logging
@@ -33,6 +37,7 @@ SCROLL_PER_NOTCH = 0.12  # fraction of the screen height one wheel notch scrolls
 SCROLL_MAX_STEP = 0.45  # longest single drag, fraction of the height
 SCROLL_MAX_STEPS = 3  # drags per scroll command; more notches than that are dropped
 SCROLL_MIN_PT = 24  # shorter drags would be taken as taps: accumulate small wheel deltas
+ROTATION_RECHECK_S = 0.5  # while the video and WDA disagree on the orientation, re-read the size this often
 
 
 class _Run:
@@ -68,15 +73,27 @@ class Controller:
         self.state = OFF
         self.message = ""
         self.device_ip = None  # learned from the AirPlay connection (WDA also listens on Wi-Fi)
+        # width / height of the mirrored video, set by the UI; None = unknown. When the iPhone
+        # rotates, the video turns at once, while WDA's cached screen size would only be
+        # re-read after IDLE_CHECK seconds without input.
+        self.screen_aspect = None
         self.wda = None
         self._lock = threading.RLock()
         self._run = None
         self._thread = None
         self._scroll_carry = (0.0, 0.0)  # (notches not scrolled yet, time)
+        self._size_checked = 0.0  # time of the last orientation-driven size refresh
+        self._serial = 0  # number of announced state changes
 
     @property
     def active(self):
         return self.state in (STARTING, READY)
+
+    def snapshot(self):
+        """(state, message, serial) read together. serial goes up with every announced change,
+        so a listener can tell a new error from one it has already shown."""
+        with self._lock:
+            return self.state, self.message, self._serial
 
     def start(self):
         with self._lock:
@@ -92,8 +109,9 @@ class Controller:
         with self._lock:
             run, self._run = self._run, None
             self.wda = None
-            if run is not None or self.state != OFF:
-                self._set(OFF, "")
+            # always announced, also when already off, so a listener that applied a late
+            # (queued) notification gets back in sync
+            self._set(OFF, "")
         if run is not None:
             run.q.put(None)
             run.close()  # kills the USB helper processes, also while bring-up is in progress
@@ -104,6 +122,7 @@ class Controller:
             if run is not None and run is not self._run:
                 return False
             self.state, self.message = state, message
+            self._serial += 1
             log.info("control %s: %s", state, message.replace("\n", " | "))
             try:
                 self.on_state(state, message)
@@ -123,6 +142,7 @@ class Controller:
         try:
             self._set(STARTING, "Looking for WebDriverAgent...", run)
             self._scroll_carry = (0.0, 0.0)
+            self._size_checked = 0.0
             url = self._find_running()
             if not url:
                 usb = UsbSession()
@@ -233,6 +253,9 @@ class Controller:
     def tap(self, xf, yf):
         self._put("tap", xf, yf)
 
+    def double_tap(self, xf, yf):
+        self._put("double", xf, yf)
+
     def long_press(self, xf, yf):
         self._put("long", xf, yf)
 
@@ -259,8 +282,21 @@ class Controller:
         self._put("button", name)
 
     # ---- execution (control thread)
-    def _execute(self, wda, kind, *a):
+    def _screen_size(self, wda):
+        """Screen size in points. The cached size is re-read when it does not match the
+        orientation of the mirrored video (the iPhone has just rotated)."""
         w, h = wda.window_size()
+        aspect = self.screen_aspect
+        if aspect and (w > h) != (aspect > 1):
+            now = time.monotonic()
+            if now - self._size_checked >= ROTATION_RECHECK_S:
+                self._size_checked = now
+                w, h = wda.window_size(refresh=True)
+                log.info("screen size re-read after rotation: %.0fx%.0f pt", w, h)
+        return w, h
+
+    def _execute(self, wda, kind, *a):
+        w, h = self._screen_size(wda)
 
         def px(f):  # WDA rejects points outside the screen (a drag may end outside the window)
             return min(max(f * w, 0.0), w - 1)
@@ -270,6 +306,8 @@ class Controller:
 
         if kind == "tap":
             wda.tap(px(a[0]), py(a[1]))
+        elif kind == "double":
+            wda.double_tap(px(a[0]), py(a[1]))
         elif kind == "long":
             wda.long_press(px(a[0]), py(a[1]))
         elif kind == "swipe":
