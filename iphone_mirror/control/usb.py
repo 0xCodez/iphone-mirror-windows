@@ -1,12 +1,12 @@
-"""Bring up WebDriverAgent on a USB-connected iPhone with pymobiledevice3.
+"""Bring up WebDriverAgent with pymobiledevice3.
 
-Steps (each is a pymobiledevice3 CLI call, run in the background without a console):
-  1. find the iPhone through Apple's usbmuxd (installed by iTunes from apple.com)
+The phone's Wi-Fi address is tried first. These cable steps run only when that
+address is missing:
+  1. find the iPhone through usbmuxd
   2. check Developer Mode
-  3. mount the Developer Disk Image (downloaded/personalised automatically)
-  4. find the installed WebDriverAgent runner and launch it as an XCUITest
-     (iOS 17.4+: through a userspace tunnel, no admin rights needed)
-  5. forward a local TCP port to WDA's port 8100 on the phone
+  3. mount the Developer Disk Image
+  4. launch the installed WebDriverAgent runner
+  5. forward a local port to WDA on the phone
 """
 import io
 import json
@@ -305,13 +305,11 @@ def usbmuxd_reachable(timeout=1.5):
 
 
 # ---------------------------------------------------------------------- device queries
-def list_devices(cancel=None, usb_only=True):
-    """iPhones usbmux can see. usb_only skips a Wi-Fi pairing."""
+def list_devices(cancel=None):
+    """iPhones on the cable. Wi-Fi discovery is phone_on_wifi, not usbmux."""
     if not usbmuxd_reachable():
         raise UsbError(MSG_NO_USBMUXD)
-    args = ["usbmux", "list"]
-    if usb_only:
-        args.append("--usb")
+    args = ["usbmux", "list", "--usb"]
     code, out, err = pmd3(*args, timeout=30, cancel=cancel)
     if code == 0:
         devices = _json(out)
@@ -425,9 +423,6 @@ class UsbSession:
                 raise
         progress("Looking for the iPhone on USB...")
         devices = list_devices(cancel=cancel)
-        if not devices:
-            progress("No cable. Looking for the iPhone on Wi-Fi...")
-            devices = list_devices(cancel=cancel, usb_only=False)
         if not devices:
             raise UsbError(MSG_NO_DEVICE)
         if len(devices) > 1:

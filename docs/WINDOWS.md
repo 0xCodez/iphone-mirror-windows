@@ -9,7 +9,7 @@ A floating iPhone window. Plug in for the sharp picture. Pick Screen Mirroring w
 3. For the cable picture, install iTunes and iCloud from apple.com. Sideloadly needs both. The Microsoft Store "Apple Devices" app does not find the phone over Wi-Fi. Unlock the phone and tap Trust. The cable picture needs iOS 27 or later. On an older phone, use Screen Mirroring, or the original project this copy is based on.
 4. Turn on Developer Mode. `control.bat reveal-dev-mode` shows the switch. Turning it on, and the restart, happen on the phone.
 5. For typing, and for mouse and keyboard while Screen Mirroring, run `control.bat get-wda`, sign that file with Sideloadly and a free Apple ID, then trust it under Settings > General > VPN & Device Management. `control.bat doctor` should pass. A free signature lasts 7 days. Leave the bar lock open. The helper starts on its own when a picture is up. `control.bat start` does the same, and that start mounts Apple's developer disk image. The home-screen line "automation running" is expected. Hold both volume buttons on the phone to stop it. The helper starts over Wi-Fi. On 12 Nov 2026 it was still answering after the cable was unplugged. Unplugging still keeps the Screen Mirroring picture where it is.
-6. Allow Python on private networks when Windows Firewall asks. The phone and the PC use the same Wi-Fi for Screen Mirroring.
+6. Allow Python on private networks when Windows Firewall asks. The phone and the PC use the same Wi-Fi for Screen Mirroring. There is no pairing password. Another phone on that Wi-Fi can choose this PC. While the helper is running, the phone accepts taps from the network with no password. Quit the app to stop the helper. Closing the lock does not.
 
 The shortcut and `run.bat` both use `pythonw`, so no console window opens. A second launch only focuses the window that is already open. Watching over Wi-Fi, with no clicks, needs Python, `install.bat`, the firewall prompt, and Screen Mirroring. It does not need the helper.
 
@@ -19,7 +19,7 @@ Settings, the log, and the AirPlay identity live in `%LOCALAPPDATA%\iPhoneMirror
 
 Cable is the normal picture. It runs only while the phone is plugged into this PC. Unplugging stops the picture and does not switch to Wi-Fi. The window stays open and says Unplugged, with a Use Screen Mirroring button. Plugging the phone back in starts the cable picture again, including if Screen Mirroring was on.
 
-Screen Mirroring is AirPlay. It starts only if you pick it or press Use Screen Mirroring. On the phone: Control Center, Screen Mirroring, then this PC's name. The waiting line uses that name. It is the computer name unless you renamed the receiver.
+Screen Mirroring is AirPlay. It starts only if you pick it or press Use Screen Mirroring. On the phone: Control Center, Screen Mirroring, then the name in the waiting line. A new install uses PC. Rename PC in the menu changes it. A saved computer name is replaced with PC on the next launch.
 
 While the cable picture is up, the phone cannot use its camera or microphone. Unplugging is what gives them back. That release is not retested after the latest build.
 
