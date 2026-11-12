@@ -932,7 +932,17 @@ class PhoneWindow(QWidget):
         self.settings["controls"] = "open" if open_ else "locked"
         self.settings.save()
         self._release_finger()
-        if self._g is not None:
+        if not open_:
+            self._drop_tap()
+            self._wheel_acc = 0.0
+            self._wheel_timer.stop()
+            self._type_buf = ""
+            self._type_timer.stop()
+            self._g = None
+            self._long_timer.stop()
+            if self.mouseGrabber() is self:
+                self.releaseMouse()
+        elif self._g is not None:
             self._cancel_gesture()
         self._hint("Unlocked" if open_ else "Locked")
         if open_:
@@ -1100,6 +1110,9 @@ class PhoneWindow(QWidget):
     def _flush_tap(self):
         """Send the held-back click as a single tap (no second click came in time)."""
         self._tap_timer.stop()
+        if not self._controls_open():
+            self._pending_tap = None
+            return
         a, self._pending_tap = self._pending_tap, None
         if a is not None:
             self._send_tap(a)
@@ -1156,6 +1169,9 @@ class PhoneWindow(QWidget):
             self._add_effect("tap", a)
 
     def _flush_wheel(self):
+        if not self._controls_open():
+            self._wheel_acc = 0.0
+            return
         n, self._wheel_acc = self._wheel_acc, 0.0
         if abs(n) < 0.02:
             return

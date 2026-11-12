@@ -86,19 +86,16 @@ class Settings:
 
 
 def picture_mode(settings, force_usb=False) -> str:
-    """cable = fast picture over USB only, wifi = AirPlay. auto is cable."""
+    """cable = fast picture over USB only, wifi = AirPlay. Missing and auto are cable."""
     if force_usb:
         return "cable"
-    mode = settings.get("picture")
-    if mode == "wifi":
+    if settings.get("picture") == "wifi":
         return "wifi"
-    if mode in ("auto", "cable") or settings.get("backend") == "usb":
-        return "cable"
-    return "wifi"
+    return "cable"
 
 
 def _picture_mode_check():
-    assert picture_mode({}) == "wifi"
+    assert picture_mode({}) == "cable"
     assert picture_mode({"backend": "usb"}) == "cable"
     assert picture_mode({"picture": "auto"}) == "cable"
     assert picture_mode({"picture": "cable", "backend": "usb"}) == "cable"
