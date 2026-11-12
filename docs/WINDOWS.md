@@ -52,4 +52,6 @@ Icons are Material Icons Outlined, bundled beside the window code. Home is a cir
 
 Complete means the checks in `docs/superpowers/plans/2026-11-12-finish.md` pass, not a new feature. Still open: Screen Mirroring clicks with the helper actually running, sound only on Screen Mirroring, tray Quit, arrow keys, volume from the bar, resize, double-click to change size, Alt+drag while unpinned, a second launch only focusing, and the error screen (Try again, the other picture, Open log).
 
+Two code gaps are confirmed and not fixed yet. A brand-new settings file starts on Screen Mirroring instead of the cable. Closing the lock does not throw away a tap or a wheel notch that was already waiting to be sent.
+
 The wheel stays as it is. Wi-Fi delay stays as it is. A passcode keypad, Control Center inside the window, and a speaker picker are not part of this copy.
