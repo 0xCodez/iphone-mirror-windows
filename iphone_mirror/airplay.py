@@ -387,6 +387,7 @@ class Receiver:
         self._mirror_owner = None
         self._thread = None
         self._server = None
+        self._did_stop = False
 
     def emit(self, event, **info):
         try:
@@ -484,6 +485,9 @@ class Receiver:
         self.loop.call_soon_threadsafe(lambda: self.loop.run_in_executor(None, reannounce))
 
     def stop(self):
+        if self._did_stop:
+            return
+        self._did_stop = True
         logging.getLogger("asyncio").setLevel(logging.CRITICAL)  # pending accept tasks at exit are harmless
         if self.advertiser:
             try:

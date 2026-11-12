@@ -12,9 +12,9 @@ from PySide6.QtWidgets import QApplication
 
 from . import net
 from .airplay import Receiver
-from .config import APP_DIR, LOG_FILE, SETTINGS_FILE, Settings
+from .config import APP_DIR, LOG_FILE, SETTINGS_FILE, Settings, picture_mode
 from .control import OFF, Controller
-from .ui import Bridge, PhoneWindow
+from .ui import Bridge, PhoneWindow, app_icon
 
 INSTANCE_KEY = "iPhoneMirror-single-instance"
 LOCAL_PORT = 7100  # --local self-tests must not collide with a normal instance on port 7000
@@ -45,13 +45,27 @@ def parse_args():
         f"separate settings file",
     )
     p.add_argument("--port", type=int, help=f"RTSP port (default {net.PORT}, or {LOCAL_PORT} with --local)")
+    p.add_argument("--usb", action="store_true", help="paint the USB/CoreDevice picture instead of AirPlay")
     p.add_argument("--control", action="store_true", help="start iPhone control (USB / WebDriverAgent) at launch")
     p.add_argument("--grab", metavar="DIR", help="self-test: save a PNG of the window every 2 s")
     p.add_argument("--quit-after", type=float, default=0, help="self-test: exit after N seconds")
     return p.parse_args()
 
 
+def windows_taskbar_id():
+    """Stop the taskbar from showing pythonw.exe's icon for this window."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("iPhoneMirror")
+    except OSError:
+        logging.getLogger(__name__).warning("could not set the Windows taskbar icon id")
+
+
 def main():
+    windows_taskbar_id()
     args = parse_args()
     if args.local:
         net.BIND_HOST = "127.0.0.1"
@@ -62,6 +76,8 @@ def main():
     setup_logging()
     app = QApplication(sys.argv[:1])
     app.setApplicationName("iPhone Mirror")
+    app.setQuitOnLastWindowClosed(False)
+    app.setWindowIcon(app_icon())
 
     instance = None
     if not args.local:
@@ -84,11 +100,19 @@ def main():
     # Controller.on_state runs on the control thread: hand it to the GUI thread via a queued signal
     ctrl = Controller(on_state=lambda state, message: bridge.control.emit(state, message))
     win = PhoneWindow(settings, None, ctrl)
-    rx = Receiver(
-        settings,
-        on_frame=lambda arr, w, h: bridge.frame.emit(arr, w, h),
-        on_event=lambda e, info: bridge.event.emit(e, info),
-    )
+
+    def open_receiver():
+        mode = "wifi" if args.local else picture_mode(settings, force_usb=args.usb)
+        on_frame = lambda arr, w, h: bridge.frame.emit(arr, w, h)
+        on_event = lambda e, info: bridge.event.emit(e, info)
+        if mode == "wifi":
+            return Receiver(settings, on_frame=on_frame, on_event=on_event)
+        from .usbvideo import UsbReceiver
+
+        return UsbReceiver(settings, on_frame, on_event, require_usb=(mode == "cable"))
+
+    win._open_receiver = open_receiver
+    rx = open_receiver()
     win.rx = rx
     if args.local:
         rx.muted = True  # self-test: decode audio but keep the speakers silent
@@ -123,7 +147,10 @@ def main():
         pass
     if ctrl.state != OFF:
         ctrl.stop()
-    rx.stop()
+    win._closing = True
+    live = win.rx or rx
+    if live is not None:
+        live.stop()
     logging.info("exit")
     return code
 

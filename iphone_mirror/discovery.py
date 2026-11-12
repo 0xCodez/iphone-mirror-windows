@@ -63,6 +63,7 @@ def txt_bytes(txt: dict) -> bytes:
 
 def local_ipv4_addresses():
     addrs = set()
+    primary = None
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             addrs.add(info[4][0])
@@ -71,10 +72,17 @@ def local_ipv4_addresses():
     try:  # address of the default route
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
             s.connect(("192.0.2.1", 9))
-            addrs.add(s.getsockname()[0])
+            primary = s.getsockname()[0]
+            addrs.add(primary)
     except OSError:
         pass
-    return sorted(a for a in addrs if not a.startswith(("127.", "169.254.")))
+    usable = sorted(a for a in addrs if not a.startswith(("127.", "169.254.")))
+    # Hostname resolution on this PC also returns Tailscale (100.x) and the
+    # Hyper-V switch (172.30.x). Advertising those makes the iPhone dial an
+    # address it cannot use for AirPlay, so publish the LAN address only.
+    if primary and primary in usable:
+        return [primary]
+    return usable
 
 
 class Advertiser:

@@ -15,9 +15,10 @@ LOG_FILE = APP_DIR / "iphone_mirror.log"
 DEFAULTS = {
     # name shown on the iPhone in Control Center -> Screen Mirroring
     "name": "",
-    # resolution requested from the iPhone; the height controls the stream size
-    "width": 1920,
-    "height": 1080,
+    # resolution requested from the iPhone. Smaller than 1080p so the Wi-Fi
+    # stream stays close to live. The window is only a few hundred pixels wide.
+    "width": 720,
+    "height": 1560,
     "fps": 60,
     "audio": True,
     "always_on_top": True,
@@ -82,3 +83,28 @@ class Settings:
     @property
     def raop_prefix(self) -> str:  # AABBCCDDEEFF
         return self.mac_bytes.hex().upper()
+
+
+def picture_mode(settings, force_usb=False) -> str:
+    """cable = fast picture over USB only, wifi = AirPlay. auto is cable."""
+    if force_usb:
+        return "cable"
+    mode = settings.get("picture")
+    if mode == "wifi":
+        return "wifi"
+    if mode in ("auto", "cable") or settings.get("backend") == "usb":
+        return "cable"
+    return "wifi"
+
+
+def _picture_mode_check():
+    assert picture_mode({}) == "wifi"
+    assert picture_mode({"backend": "usb"}) == "cable"
+    assert picture_mode({"picture": "auto"}) == "cable"
+    assert picture_mode({"picture": "cable", "backend": "usb"}) == "cable"
+    assert picture_mode({"picture": "wifi"}) == "wifi"
+    assert picture_mode({}, force_usb=True) == "cable"
+
+
+if __name__ == "__main__":
+    _picture_mode_check()

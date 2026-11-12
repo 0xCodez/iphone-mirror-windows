@@ -6,6 +6,10 @@ much like "iPhone Mirroring" on macOS. Picture and sound come over Wi-Fi with no
 install on the phone. If you also connect the iPhone with a cable once and set up
 WebDriverAgent, you can control it from the PC with your mouse and keyboard.
 
+This private copy also draws the phone over the USB cable in the same window. Read
+[docs/WINDOWS.md](docs/WINDOWS.md) before the rest of this file. The sections below still
+describe the original AirPlay app and do not match every control in this copy.
+
 ## Features
 
 - **Wireless AirPlay mirroring with sound.** The iPhone sees the PC as an AirPlay receiver

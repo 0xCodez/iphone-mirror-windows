@@ -286,18 +286,21 @@ def usbmuxd_reachable(timeout=1.5):
 
 
 # ---------------------------------------------------------------------- device queries
-def list_devices(cancel=None):
-    """iPhones on USB: dicts with Identifier, DeviceName, ProductVersion, ProductType, ..."""
+def list_devices(cancel=None, usb_only=True):
+    """iPhones usbmux can see. usb_only skips a Wi-Fi pairing."""
     if not usbmuxd_reachable():
         raise UsbError(MSG_NO_USBMUXD)
-    code, out, err = pmd3("usbmux", "list", "--usb", timeout=30, cancel=cancel)
+    args = ["usbmux", "list"]
+    if usb_only:
+        args.append("--usb")
+    code, out, err = pmd3(*args, timeout=30, cancel=cancel)
     if code == 0:
         devices = _json(out)
         return [d for d in devices if isinstance(d, dict)] if isinstance(devices, list) else []
     hint = explain(err)
     if hint is None:
         # reading the device details needs lockdown; is there a device at all?
-        code2, out2, _ = pmd3("usbmux", "list", "--usb", "--simple", timeout=30, cancel=cancel)
+        code2, out2, _ = pmd3(*args, "--simple", timeout=30, cancel=cancel)
         udids = _json(out2) if code2 == 0 else None
         if isinstance(udids, list) and any(isinstance(u, str) for u in udids):
             hint = MSG_NOT_TRUSTED
@@ -388,6 +391,9 @@ class UsbSession:
         cancel = self._closed
         progress("Looking for the iPhone on USB...")
         devices = list_devices(cancel=cancel)
+        if not devices:
+            progress("No cable. Looking for the iPhone on Wi-Fi...")
+            devices = list_devices(cancel=cancel, usb_only=False)
         if not devices:
             raise UsbError(MSG_NO_DEVICE)
         if len(devices) > 1:
@@ -511,6 +517,7 @@ def _ipa_member(name):
         or ".." in parts
         or parts[-1].startswith("._")
         or parts[-1] == ".DS_Store"
+        or any(part.endswith(".dSYM") for part in parts)
     )
 
 
