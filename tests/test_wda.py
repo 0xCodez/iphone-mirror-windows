@@ -853,7 +853,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("[OK]   pymobiledevice3", out)
         self.assertIn("[FAIL] Apple's USB service", out)
-        self.assertIn("Apple Devices", out)
+        self.assertIn("iTunes and iCloud from apple.com", out)
         self.assertIn(f"[OK]   WebDriverAgent answers at {self.mock.url} (iPhone Wi-Fi address 10.0.0.2)", out)
 
     def test_doctor_all_good(self):

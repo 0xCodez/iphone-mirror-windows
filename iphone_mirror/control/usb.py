@@ -1,7 +1,7 @@
 """Bring up WebDriverAgent on a USB-connected iPhone with pymobiledevice3.
 
 Steps (each is a pymobiledevice3 CLI call, run in the background without a console):
-  1. find the iPhone through Apple's usbmuxd (installed by the "Apple Devices" app)
+  1. find the iPhone through Apple's usbmuxd (installed by iTunes from apple.com)
   2. check Developer Mode
   3. mount the Developer Disk Image (downloaded/personalised automatically)
   4. find the installed WebDriverAgent runner and launch it as an XCUITest
@@ -34,8 +34,9 @@ USBMUXD_WINDOWS = ("127.0.0.1", 27015)  # Apple Mobile Device Service
 
 MSG_NO_USBMUXD = (
     "Apple's USB service (usbmuxd) is not running.\n"
-    "Install \"Apple Devices\" from the Microsoft Store (or iTunes), connect the iPhone "
-    "with a cable and tap \"Trust\" on the phone."
+    "Install iTunes and iCloud from apple.com. Sideloadly needs both.\n"
+    "The Microsoft Store \"Apple Devices\" app does not find the phone over Wi-Fi.\n"
+    "Then connect the iPhone with a cable and tap \"Trust\"."
 )
 MSG_NO_DEVICE = "No iPhone found on USB. Connect it with a cable, unlock it and tap \"Trust\"."
 MSG_NOT_TRUSTED = (

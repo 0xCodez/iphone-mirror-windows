@@ -6,9 +6,14 @@ much like "iPhone Mirroring" on macOS. Picture and sound come over Wi-Fi with no
 install on the phone. If you also connect the iPhone with a cable once and set up
 WebDriverAgent, you can control it from the PC with your mouse and keyboard.
 
-This private copy also draws the phone over the USB cable in the same window. Read
-[docs/WINDOWS.md](docs/WINDOWS.md) before the rest of this file. The sections below still
-describe the original AirPlay app and do not match every control in this copy.
+This copy also draws the phone over the USB cable in the same window. Modified from
+0xCodez/iphone-mirror-windows in November 2026. Read [docs/WINDOWS.md](docs/WINDOWS.md)
+before the rest of this file. The sections below still describe the original AirPlay app
+and do not match every control in this copy.
+
+In this copy the top bar has a lock, not the old hand button. Leave the lock open and the
+helper starts when a picture is showing. `control.bat start` does the same. The cable
+picture needs iOS 27 or later.
 
 ## Features
 
@@ -269,10 +274,8 @@ plays to the right output device. The iPhone's own volume buttons also control t
 
 - **Protected content is not mirrored.** Apps that use DRM (Netflix, Apple TV and similar)
   show a black screen. The iPhone decides this, not the receiver.
-- **Resolution.** The iPhone is asked for a stream 1080 pixels high by default. To try a
-  sharper picture, quit the app, set `"height": 1440` in
-  `%LOCALAPPDATA%\iPhoneMirror\settings.json` and start it again. If the iPhone stops
-  connecting, change it back to `1080`.
+- **Resolution.** Screen Mirroring asks for 720×1560 at 60 fps. The cable picture is the
+  phone's own pixels and does not use that setting.
 - **Control latency.** Every action is an HTTP request to WebDriverAgent, so expect about
   100-200 ms before the iPhone reacts. A single click waits about 0.2 s more, to tell it
   from a double-click.
@@ -288,7 +291,7 @@ plays to the right output device. The iPhone's own volume buttons also control t
 | Key | Default | Meaning |
 |---|---|---|
 | `name` | computer name | Name shown on the iPhone under Screen Mirroring |
-| `width`, `height` | `1920`, `1080` | Stream size requested from the iPhone (the height decides the resolution) |
+| `width`, `height` | `720`, `1560` | Screen Mirroring size requested from the iPhone |
 | `fps` | `60` | Frame rate requested from the iPhone |
 | `audio` | `true` | Play the iPhone sound on the PC |
 | `always_on_top` | `true` | Keep the window above other windows |

@@ -22,8 +22,9 @@ DEFAULT_URL = f"http://127.0.0.1:{usb.WDA_PORT}"
 MODULE = "python -m iphone_mirror.control"
 
 ADVICE_USBMUXD = (
-    "Install \"Apple Devices\" from the Microsoft Store (or iTunes from apple.com).\n"
-    "If it is installed already, open it once with the iPhone connected, or restart Windows.\n"
+    "Install iTunes and iCloud from apple.com. Sideloadly needs both.\n"
+    "The Microsoft Store \"Apple Devices\" app does not find the phone over Wi-Fi.\n"
+    "If iTunes is installed already, open it once with the iPhone connected, or restart Windows.\n"
     "Then connect the iPhone with a cable, unlock it and tap \"Trust\"."
 )
 ADVICE_NOT_RUNNING = f"Normal until control is started: {MODULE} start (or turn on control in the app)."

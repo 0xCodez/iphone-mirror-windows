@@ -6,11 +6,12 @@ A floating iPhone window. Plug in for the sharp picture. Pick Screen Mirroring w
 
 1. Install Python 3.11 or newer from python.org and tick "Add python.exe to PATH".
 2. Clone this repo and double-click `install.bat`. That creates `%LOCALAPPDATA%\iPhoneMirror\venv`, installs `requirements.txt`, and adds Desktop and Start shortcuts named iPhone Mirror.
-3. For the cable picture, install iTunes from apple.com so Apple's USB driver is present. The Microsoft Store "Apple Devices" app is not the same driver. Unlock the phone, tap Trust, and turn on Developer Mode.
-4. For typing, and for mouse and keyboard while Screen Mirroring, sign WebDriverAgent with Sideloadly and a free Apple ID, then start it from this app. A free signature lasts about 7 days. The home-screen line "automation running" is expected while that helper is running. Hold both volume buttons on the phone to stop it.
-5. Allow Python on private networks when Windows Firewall asks. The phone and the PC use the same Wi-Fi for Screen Mirroring.
+3. For the cable picture, install iTunes and iCloud from apple.com. Sideloadly needs both. The Microsoft Store "Apple Devices" app does not find the phone over Wi-Fi. Unlock the phone and tap Trust. The cable picture needs iOS 27 or later. On an older phone, use Screen Mirroring, or the original project this copy is based on.
+4. Turn on Developer Mode. `control.bat reveal-dev-mode` shows the switch. Turning it on, and the restart, happen on the phone.
+5. For typing, and for mouse and keyboard while Screen Mirroring, run `control.bat get-wda`, sign that file with Sideloadly and a free Apple ID, then trust it under Settings > General > VPN & Device Management. `control.bat doctor` should pass. A free signature lasts 7 days. Leave the bar lock open. The helper starts on its own when a picture is up. `control.bat start` does the same, and that start mounts Apple's developer disk image. The home-screen line "automation running" is expected. Hold both volume buttons on the phone to stop it. The original project says unplugging usually ends that helper session. That has not been rechecked here.
+6. Allow Python on private networks when Windows Firewall asks. The phone and the PC use the same Wi-Fi for Screen Mirroring.
 
-`run.bat` starts the app with a console. The shortcut uses `pythonw`, so no console window opens. A second launch only focuses the window that is already open.
+The shortcut and `run.bat` both use `pythonw`, so no console window opens. A second launch only focuses the window that is already open. Watching over Wi-Fi, with no clicks, needs Python, `install.bat`, the firewall prompt, and Screen Mirroring. It does not need the helper.
 
 Settings, the log, and the AirPlay identity live in `%LOCALAPPDATA%\iPhoneMirror\`. Do not commit `settings.json`. It holds the receiver key.
 
@@ -28,14 +29,14 @@ The same rules apply on both pictures.
 
 - Left click is a tap, a double tap, or a long press. Moving the left button more than 10 pixels does nothing.
 - Middle button drags in both directions. A white line shows during that drag. A middle click with no movement does nothing.
-- The wheel scrolls vertically. It is good enough and a bit stuttery. Do not retune it.
+- The wheel scrolls vertically. It can stutter. That is expected.
 - A tap shows a small ripple. The line belongs to the middle button only.
 - The top bar fades in when the pointer enters the window and fades out when it leaves.
 - Drag the top bar, or hold Alt and drag, to move the window. A bright pin keeps the window on top and refuses that drag. Click the pin dim before moving it.
 - The top-right X and Alt+F4 hide the window to the tray. The picture keeps running. Tray Quit exits. Tray Quit has not been tested.
 - The bar lock replaces the hand. Open means the mouse and keyboard control the phone. Closed means they move the window instead. It stays as you set it when you switch pictures. Default is open.
 
-Cable clicks use the USB picture's own touch path, so they do not wait for WebDriverAgent. Screen Mirroring clicks, drags, scrolls, and typing go through WebDriverAgent. That helper has to be installed, signed, and actually running. On 12 Nov 2026 the Screen Mirroring picture worked, and the clicks failed while the helper was not running. Do not treat that failure as a reason to add a new tunnel. Retest with the helper running before changing the control path.
+Cable clicks use the USB picture's own touch path, so they do not wait for WebDriverAgent. Screen Mirroring clicks, drags, scrolls, and typing go through WebDriverAgent. That helper has to be installed, signed, trusted, and actually running. Clicks on Screen Mirroring have not been seen working yet. The last failure was the helper not running. Start it, then test again, before changing how control works.
 
 Screen Mirroring is slower than the cable. That gap stays.
 

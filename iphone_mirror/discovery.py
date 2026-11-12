@@ -77,9 +77,9 @@ def local_ipv4_addresses():
     except OSError:
         pass
     usable = sorted(a for a in addrs if not a.startswith(("127.", "169.254.")))
-    # Hostname resolution on this PC also returns Tailscale (100.x) and the
-    # Hyper-V switch (172.30.x). Advertising those makes the iPhone dial an
-    # address it cannot use for AirPlay, so publish the LAN address only.
+    # Hostname lookup can also return a VPN or a virtual switch. Advertising
+    # those makes the iPhone dial an address it cannot use, so publish the
+    # default-route address only.
     if primary and primary in usable:
         return [primary]
     return usable
