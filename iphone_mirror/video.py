@@ -75,6 +75,7 @@ class VideoDecoder(threading.Thread):
         self._scale_src = None
         self._scale_sink = None
         self._scale_bad = None
+        self._epoch = 0  # discard() bumps this so a packet already taken is not painted
 
     def submit(self, data: bytes):
         try:
@@ -84,6 +85,15 @@ class VideoDecoder(threading.Thread):
 
     def reset(self):
         self.submit(None)
+
+    def discard(self):
+        """Drop packets still queued. A closed stream must not paint another frame."""
+        self._epoch += 1
+        while True:
+            try:
+                self.q.get_nowait()
+            except queue.Empty:
+                break
 
     def stop(self):
         self._stop = True
@@ -105,9 +115,10 @@ class VideoDecoder(threading.Thread):
 
     def run(self):
         while not self._stop:
+            epoch = self._epoch
             data = self.q.get()
-            if self._stop:
-                break
+            if self._stop or epoch != self._epoch:
+                continue
             if data is None:
                 self._codec = None
                 continue
@@ -122,10 +133,12 @@ class VideoDecoder(threading.Thread):
                 continue
             # Drop a frame only when a newer one is already waiting and we just
             # painted. That catches up without holding the picture for 50ms.
-            if not self.q.empty() and time.monotonic() - self._last_deliver < 0.008:
+            if epoch != self._epoch or (not self.q.empty() and time.monotonic() - self._last_deliver < 0.008):
                 continue
             frame = frames[-1]
             try:
+                if epoch != self._epoch:
+                    continue
                 self._deliver(frame)
             except Exception:
                 log.exception("frame conversion failed")
@@ -200,6 +213,7 @@ class MirrorStream:
         self.events = events  # callable(event: str, **info)
         self.server = None
         self.port = 0
+        self._writer = None
         self._sps_pps = None
         self._checked = False
         self._bad = 0
@@ -213,15 +227,39 @@ class MirrorStream:
         return self.port
 
     async def stop(self):
-        if self.server:
-            self.server.close()
-            self.server = None
-        if self._task:
-            self._task.cancel()
-            self._task = None
+        writer = self._writer
+        if writer is not None:
+            transport = getattr(writer, "transport", None)
+            try:
+                writer.close()
+            except Exception:
+                pass
+            if transport is not None:
+                try:
+                    transport.abort()
+                except Exception:
+                    pass
+        server = self.server
+        self.server = None
+        if server is not None:
+            server.close()
+        task = self._task
+        self._task = None
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            try:
+                await asyncio.wait_for(task, timeout=1)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        if server is not None:
+            try:
+                await asyncio.wait_for(server.wait_closed(), timeout=1)
+            except (asyncio.TimeoutError, Exception):
+                pass
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         self._task = asyncio.current_task()
+        self._writer = writer
         peer = writer.get_extra_info("peername")
         log.info("mirror stream connected from %s", peer)
         sock = writer.get_extra_info("socket")
@@ -245,7 +283,12 @@ class MirrorStream:
         except Exception:
             log.exception("mirror stream error")
         finally:
-            writer.close()
+            self._writer = None
+            try:
+                writer.close()
+            except Exception:
+                pass
+            self.decoder.discard()
             self.events("mirror_stopped")
 
     def _packet(self, hdr: bytes, payload: bytes):

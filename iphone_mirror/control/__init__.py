@@ -140,6 +140,9 @@ class Controller:
     def _main(self, run):
         wda = None
         try:
+            from .usb import com_mta
+
+            com_mta()
             self._set(STARTING, "Looking for WebDriverAgent...", run)
             self._scroll_carry = (0.0, 0.0, "y")
             self._size_checked = 0.0

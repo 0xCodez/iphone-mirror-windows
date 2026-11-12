@@ -58,49 +58,55 @@ class UsbReceiver:
         self._thread.start()
 
     def _run(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        try:
-            self.loop.run_until_complete(self._main())
-        except Exception:
-            log.exception("usb picture crashed")
-            if not self._stop.is_set():
-                self.emit("error", message="USB picture stopped. Unlock the phone, quit Camera, and try again.")
-
-    async def _main(self):
-        from pymobiledevice3.usbmux import list_devices
-
+        # The device check used to keep one asyncio loop alive and sleep inside it.
+        # That sleep sits in a Windows completion port. While the window is handling
+        # messages, Windows rejects the call (0x8001010d) and the process dies.
+        # Nothing being plugged in is normal: pause with a thread wait, and open a
+        # loop only for an actual check or an actual picture.
         waiting = False
+        list_failed = False
         while not self._stop.is_set():
             try:
-                devices = await list_devices()
+                chosen = _call(_first_usb_device())
             except Exception:
-                log.exception("usb device list failed")
-                await asyncio.sleep(1.0)
-                continue
-            usb = [d for d in devices if d.is_usb]
-            if not usb:
+                if not list_failed:
+                    log.exception("usb device list failed")
+                    list_failed = True
+                chosen = None
+            else:
+                list_failed = False
+            if chosen is None:
                 if not waiting:
                     self.emit("unplugged")
                     waiting = True
-                await asyncio.sleep(1.0)
+                if self._stop.wait(1.0):
+                    return
                 continue
             waiting = False
-            chosen = usb[0]
             self._aus = 0
             self.emit("connecting", name="iPhone", via="Cable")
             log.info("usb picture using %s (%s)", chosen.serial, chosen.connection_type)
-            reason = await self._stream(chosen)
+            try:
+                reason = _call(self._stream(chosen))
+            except Exception:
+                log.exception("usb picture crashed")
+                if not self._stop.is_set():
+                    self.emit("error", message="USB picture stopped. Unlock the phone, quit Camera, and try again.")
+                return
             if self._stop.is_set() or reason == "stop":
                 return
             if reason == "error":
                 return
-            if reason in ("unplugged", "ended") and not await _serial_is_usb(chosen.serial):
+            if reason in ("unplugged", "ended") and not _call(_serial_is_usb(chosen.serial)):
                 self.emit("unplugged")
-                await _release_phone(chosen.serial)
+                try:
+                    _call(_release_phone(chosen.serial))
+                except Exception:
+                    log.warning("could not release the phone camera", exc_info=True)
                 waiting = True
                 continue
-            await asyncio.sleep(0.5)
+            if self._stop.wait(0.5):
+                return
 
     async def _stream(self, chosen):
         from pymobiledevice3.remote.core_device.screen_stream import ScreenStreamServer
@@ -563,6 +569,26 @@ def _hid(fraction):
 
 def _hid_px(value):
     return max(0, min(65535, int(round(value))))
+
+
+def _call(coro):
+    """Run one USB task, then close the loop before the caller waits."""
+    loop = asyncio.new_event_loop()
+    try:
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coro)
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
+
+
+async def _first_usb_device():
+    from pymobiledevice3.usbmux import list_devices
+
+    for device in await list_devices():
+        if device.is_usb:
+            return device
+    return None
 
 
 async def _serial_is_usb(serial) -> bool:

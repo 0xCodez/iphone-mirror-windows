@@ -85,8 +85,8 @@ _BAR_GLYPH = {
 class Bridge(QObject):
     """Carries callbacks from worker threads to the GUI thread (queued signals)."""
 
-    frame = Signal(object, int, int)
-    event = Signal(str, dict)
+    frame = Signal(object, object, int, int)  # receiver, pixels, width, height
+    event = Signal(object, str, dict)  # receiver, name, info
     control = Signal(str, str)  # Controller.on_state(state, message)
 
 
@@ -148,6 +148,21 @@ def is_key(event, keys, vks=()) -> bool:
     return event.key() in keys or (bool(vks) and event.nativeVirtualKey() in vks)
 
 
+def keep_wifi_in_background(target_mode, old_is_wifi, was_mirroring) -> bool:
+    """The cable picture can take the window without hanging up Screen Mirroring."""
+    return target_mode == "cable" and old_is_wifi and was_mirroring
+
+
+def background_wifi_is_live(seconds_since_frame, limit=2.0) -> bool:
+    """A recent frame means the phone is still sending the Wi-Fi picture."""
+    return seconds_since_frame is not None and 0 <= seconds_since_frame < limit
+
+
+def controls_are_pending(controls_open, failed, picture_busy, gestures_on) -> bool:
+    """The picture is up, or on its way, and clicks are not accepted yet."""
+    return bool(controls_open) and not failed and picture_busy and not gestures_on
+
+
 class PhoneWindow(QWidget):
     picture_stopped = Signal()
     cable_arrived = Signal(bool)
@@ -160,6 +175,7 @@ class PhoneWindow(QWidget):
         self.setWindowTitle("iPhone Mirror")
         self.setWindowIcon(app_icon())
         self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WA_AlwaysShowToolTips)
         self.setMouseTracking(True)
         self._apply_flags()
 
@@ -168,6 +184,7 @@ class PhoneWindow(QWidget):
         self.src_size = None
         self.aspect = DEFAULT_ASPECT
         self.state = "starting"
+        self._hold_frames = False  # a frame left over after Screen Mirroring stops must not revive the picture
         self.info = {}
         self.client = None
         self.via = ""
@@ -179,8 +196,14 @@ class PhoneWindow(QWidget):
         self._switching = False
         self._switch_again = False
         self._closing = False
+        self._parked = None  # Screen Mirroring receiver kept alive behind the cable picture
+        self._parked_frame_at = None
+        self._parked_muted = False
+        self._wifi_snap = None  # last Wi-Fi frame, so coming back is not a blank card
+        self._adopt_parked = False
         self.picture_stopped.connect(self._start_switched_picture)
         self._cable_busy = False
+        self._cable_left = False  # a cable that was already in does not count as plugging in
         self.cable_arrived.connect(self._on_cable)
         self._cable_timer = QTimer(self, interval=1500, timeout=self._watch_cable)
         self._cable_timer.start()
@@ -289,7 +312,15 @@ class PhoneWindow(QWidget):
         self.set_phone_height(target)
 
     # ------------------------------------------------------------ data from receiver / controller
-    def on_frame(self, arr, src_w, src_h):
+    def on_frame(self, rx, arr, src_w, src_h):
+        if rx is self._parked:
+            self._parked_frame_at = time.monotonic()
+            self._wifi_snap = (arr.copy(), src_w, src_h)
+            return
+        if rx is not self.rx:
+            return
+        if self._hold_frames:
+            return  # the stream already closed; this frame was still in the decoder
         h, w = arr.shape[:2]
         self._array = arr
         self.image = QImage(arr.data, w, h, arr.strides[0], QImage.Format_RGB32)
@@ -316,16 +347,28 @@ class PhoneWindow(QWidget):
             self._frames, self._fps_t = 0, now
         self.update()
 
-    def on_event(self, event, info):
+    def on_event(self, rx, event, info):
         log.debug("ui event %s %s", event, info)
+        if rx is not self.rx:
+            if rx is self._parked and event == "mirror_stopped":
+                self._parked_frame_at = None
+                self._wifi_snap = None
+            return
         if event == "listening":
             self.info = info
             self.via = "Wi-Fi"
             # Switching pictures sets "connecting" before the receiver is listening.
             # Leave it there and the Control Center steps never show.
-            if self.state != "mirroring":
+            # A held frame is an old picture. Do not leave it up as if it were live.
+            if self._hold_frames or self.state != "mirroring":
                 self.state = "waiting"
+                self.fps = 0.0
+                self._frames = 0
+                if self._hold_frames:
+                    self.image = None
+                    self._array = None
         elif event == "connecting":
+            self._hold_frames = False
             self.client = info.get("name")
             if info.get("via"):
                 self.via = info["via"]
@@ -343,7 +386,10 @@ class PhoneWindow(QWidget):
             if self.state == "paused" and self.image is not None:
                 self.state = "mirroring"
         elif event == "mirror_stopped":
+            self._hold_frames = True
             self.state = "waiting"
+            self.fps = 0.0
+            self._frames = 0
             self.image = None
             self._array = None
             self.src_size = None
@@ -383,24 +429,23 @@ class PhoneWindow(QWidget):
         new_error = state == ERROR and serial != self._error_serial  # each failure once, also a repeated one
         self.control_state, self.control_message = state, message
         self._control_serial = serial
-        if state != READY:
+        # Cable taps, drags and the wheel use the picture stream. A helper that is
+        # starting or has failed must not throw those away or claim the mouse is off.
+        cable = self._direct_touch()
+        if state != READY and not cable:
             self._drop_tap()
             self._cancel_gesture()
             if state != STARTING:
                 self._type_buf = ""
             self._wheel_acc = 0.0
-        elif self._type_buf and self._controls_open():
+        elif state == READY and self._type_buf and self._controls_open():
             self._flush_type()
         if new_error:
             self._error_serial = serial
             log.warning("control error shown in the window: %s", (self.control_message or "").splitlines()[0])
-        if changed or new_error:
+        if (changed or new_error) and not (cable and state in (STARTING, ERROR)):
             self._hint_text = ""  # the new control status replaces any older hint
             self._flash_bar()
-        if new_error:
-            self._hint("Mouse is off")
-            self._hint_until = time.monotonic() + 8
-            self._flash_bar(8)
         self._update_anim()
         self.update()
 
@@ -515,7 +560,7 @@ class PhoneWindow(QWidget):
                 "Could not decrypt the video",
                 "Stop Screen Mirroring on the iPhone and start it again. If it keeps happening, open the log.",
                 (("retry", "Try again"), other, ("log", "Open log")),
-                "\uE001",
+                "\uE001",  # error: circle with an exclamation
             )
         if self.state == "error":
             return (
@@ -525,13 +570,13 @@ class PhoneWindow(QWidget):
                 "\uE001",
             )
         if mode == "wifi":
-            return ("Start Screen Mirroring", wifi_steps, (("cable", "Use Cable"),), "\uE307")
+            return ("Start Screen Mirroring", wifi_steps, (("cable", "Use Cable"),), "\uE0E2")  # screen_share
         if self.state == "unplugged":
             return (
                 "Unplugged",
                 "Plug the iPhone into this PC. The picture starts on its own.",
                 (("wifi", "Use Screen Mirroring"),),
-                "\uE1E0",
+                "\uE1E0",  # usb
             )
         return (
             "Starting the picture",
@@ -685,13 +730,19 @@ class PhoneWindow(QWidget):
         if not self._controls_open():
             return "Locked"
         if self.control_state == STARTING:
-            return "Mouse and keyboard are starting"
-        if self.control_state == ERROR:
-            return "Mouse is off"
+            return "Starting"
         return ""
+
+    def _controls_pending(self) -> bool:
+        busy = self.state == "connecting" or self._picture_visible()
+        return controls_are_pending(
+            self._controls_open(), self._lock_is_error(), busy, self._gestures_on()
+        )
 
     def _bar_labels(self) -> list:
         """Top bar label, most detailed first; the painter uses the first one that fits."""
+        if self._controls_pending():
+            return ["Starting controls"]
         if self._hint_text and time.monotonic() < self._hint_until:
             return [self._hint_text]
         if self.state == "unplugged":
@@ -717,9 +768,7 @@ class PhoneWindow(QWidget):
         if st == READY:
             return QColor(GREEN)
         if st == STARTING:
-            c = QColor(ORANGE)
-            c.setAlphaF(0.35 + 0.65 * (0.5 + 0.5 * math.sin(time.monotonic() * 2 * math.pi / 1.1)))
-            return c
+            return self._pulse_orange()
         if st == ERROR:
             return QColor(RED)
         return QColor(255, 255, 255, 220)
@@ -744,11 +793,6 @@ class PhoneWindow(QWidget):
 
         s = btn["close"].width()
         k = s / 30  # glyph scale
-        if self._hover_btn in btn:
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 34))
-            p.drawEllipse(btn[self._hover_btn].center(), s * 0.42, s * 0.42)
-
         white = QColor(255, 255, 255, 220)
         if self._icon_family():
             self._paint_glyphs(p, btn, white)
@@ -785,8 +829,12 @@ class PhoneWindow(QWidget):
         # The lock and pin glyphs are not button names. Draw them in those slots.
         slot = {"unlock": "lock", "lock": "lock", "unpin": "pin", "pin": "pin"}
         for name, color in glyphs:
+            slot_name = slot.get(name, name)
+            # A hovered icon goes white. An error lock stays red so the failure stays visible.
+            if self._hover_btn == slot_name and not (slot_name == "lock" and self._lock_is_error()):
+                color = QColor(255, 255, 255)
             p.setPen(color)
-            p.drawText(btn[slot.get(name, name)], Qt.AlignCenter, _BAR_GLYPH[name])
+            p.drawText(btn[slot_name], Qt.AlignCenter, _BAR_GLYPH[name])
 
     def _paint_drawn_icons(self, p, btn, k, white):
         """Used only when the Windows icon font is missing."""
@@ -811,12 +859,28 @@ class PhoneWindow(QWidget):
         p.drawLine(QPointF(c.x(), c.y() + 2.0 * k), QPointF(c.x(), c.y() + 6.4 * k))
 
     def _lock_color(self) -> QColor:
-        """Open or closed only. A control error must not turn the lock red."""
+        """Open, closed, or red when Screen Mirroring clicks have failed."""
         if not self._controls_open():
             return QColor(255, 255, 255, 120)
-        if self.control_state == STARTING:
-            return self._control_color()
+        if self._lock_is_error():
+            return QColor(RED)
+        if self._controls_pending() or (self.control_state == STARTING and not self._direct_touch()):
+            return self._pulse_orange()
         return QColor(255, 255, 255, 230)
+
+    def _pulse_orange(self) -> QColor:
+        c = QColor(ORANGE)
+        c.setAlphaF(0.35 + 0.65 * (0.5 + 0.5 * math.sin(time.monotonic() * 2 * math.pi / 1.1)))
+        return c
+
+    def _lock_is_error(self) -> bool:
+        return self._controls_open() and not self._direct_touch() and self.control_state == ERROR
+
+    def _lock_error_tip(self) -> str:
+        msg = (self.control_message or "").splitlines()[0]
+        if self._picture_mode() == "wifi" and "cable" in msg.lower():
+            return "Clicks are off. The helper can't see the phone."
+        return msg or "Clicks are off."
 
     @staticmethod
     def _paint_lock(p, c, k, open_, color):
@@ -880,7 +944,7 @@ class PhoneWindow(QWidget):
     # ------------------------------------------------------------ animation
     def _needs_anim(self):
         fading = abs(self._bar - (1.0 if self.hover else 0.0)) > 0.004
-        pulsing = self._bar > 0.01 and self.control_state == STARTING
+        pulsing = self._controls_pending() or (self._bar > 0.01 and self.control_state == STARTING)
         return bool(self._effects) or fading or pulsing
 
     def _update_anim(self):
@@ -890,7 +954,7 @@ class PhoneWindow(QWidget):
     def _tick(self):
         now = time.monotonic()
         self._effects = [fx for fx in self._effects if now - fx["t"] < fx["life"]]
-        target = 1.0 if self.hover else 0.0
+        target = 1.0 if self.hover or self._controls_pending() else 0.0
         if self._bar != target:
             dt = min(0.05, max(0.0, now - self._bar_t))
             step = dt / BAR_FADE_S
@@ -1034,7 +1098,11 @@ class PhoneWindow(QWidget):
 
     def _on_cable(self, present):
         self._cable_busy = False
-        if present and not self._closing and not self._switching and self._picture_mode() == "wifi":
+        if not present:
+            self._cable_left = True
+            return
+        # Only a cable that arrives while Screen Mirroring is up returns to the cable picture.
+        if self._cable_left and not self._closing and not self._switching and self._picture_mode() == "wifi":
             self._hint("Cable connected")
             self._set_picture("cable")
 
@@ -1247,6 +1315,10 @@ class PhoneWindow(QWidget):
 
     def _button_tip(self, name):
         if name == "lock":
+            if self._lock_is_error():
+                return self._lock_error_tip()
+            if self._controls_pending():
+                return "Starting controls"
             if self._controls_open():
                 return "Unlocked. Click to ignore the mouse and keyboard (Ctrl+U)"
             return "Locked. Click to control the phone (Ctrl+U)"
@@ -1290,7 +1362,6 @@ class PhoneWindow(QWidget):
             # The picture is up, but the finger path is not. A click here used to drag the window.
             if self.control_state in (ERROR, OFF):
                 self._ensure_control()
-            self._hint("Mouse and keyboard are still starting" if self.control_state == STARTING else "Mouse and keyboard are starting")
             return
         if self.settings.get("always_on_top", True):
             return  # the pin is the original always-on-top switch, and it also holds the window still
@@ -1332,6 +1403,10 @@ class PhoneWindow(QWidget):
         name = self._button_at(pos) if self.hover else None
         if name != self._hover_btn:
             self._hover_btn = name
+            if name:
+                QToolTip.showText(e.globalPosition().toPoint(), self._button_tip(name), self)
+            else:
+                QToolTip.hideText()
             self.update()
         self._update_cursor(pos)
 
@@ -1395,7 +1470,6 @@ class PhoneWindow(QWidget):
         if self.state != "paused" and self._picture_visible() and self._controls_open() and not self._gestures_on() and self.phone_rect().contains(e.position()):
             if self.control_state in (ERROR, OFF):
                 self._ensure_control()
-            self._hint("Mouse and keyboard are still starting" if self.control_state == STARTING else "Mouse and keyboard are starting")
             return
         if not self._gestures_on() or not self.phone_rect().contains(e.position()):
             return
@@ -1535,6 +1609,8 @@ class PhoneWindow(QWidget):
         self.settings.save()
         words = {"auto": "Cable", "cable": "Cable", "wifi": "Screen Mirroring"}
         self._hint(words[mode])
+        if mode == "wifi":
+            self._cable_left = False
         self._restart_picture()
 
     def _restart_picture(self):
@@ -1545,9 +1621,59 @@ class PhoneWindow(QWidget):
             return
         self._switching = True
         self._switch_again = False
+        self._hold_frames = True
+        self.fps = 0.0
+        self._frames = 0
         self.via = ""
         self._release_finger()
         old = self.rx
+        target = self._picture_mode()
+        old_is_wifi = old is not None and getattr(old, "has_audio", True)
+        extra = None
+        self._adopt_parked = False
+        if keep_wifi_in_background(target, old_is_wifi, self.state == "mirroring"):
+            self._parked = old
+            self._parked_frame_at = time.monotonic()
+            self._parked_muted = bool(getattr(old, "muted", False))
+            if self._array is not None and self.src_size:
+                self._wifi_snap = (self._array.copy(), self.src_size[0], self.src_size[1])
+            try:
+                old.set_muted(True)
+            except Exception:
+                log.exception("mute behind the cable picture failed")
+            old = None
+        elif target == "wifi" and self._background_wifi_live():
+            parked = self._parked
+            self._parked = None
+            self.rx = parked
+            try:
+                parked.set_muted(self._parked_muted)
+            except Exception:
+                log.exception("unmute failed")
+            self._hold_frames = False
+            self.via = "Wi-Fi"
+            self.state = "mirroring"
+            self._update_target()
+            snap = self._wifi_snap
+            if snap is not None:
+                arr, src_w, src_h = snap
+                self.on_frame(parked, arr, src_w, src_h)
+            self._adopt_parked = True
+
+            def finish():
+                try:
+                    if old is not None:
+                        old.stop()
+                finally:
+                    self.picture_stopped.emit()
+
+            threading.Thread(target=finish, name="picture-switch", daemon=True).start()
+            return
+        elif self._parked is not None:
+            extra = self._parked
+            self._parked = None
+            self._parked_frame_at = None
+            self._wifi_snap = None
         self.state = "connecting"
         self.image = None
         self._array = None
@@ -1557,15 +1683,30 @@ class PhoneWindow(QWidget):
             try:
                 if old is not None:
                     old.stop()
+                if extra is not None:
+                    extra.stop()
             finally:
                 self.picture_stopped.emit()
 
         threading.Thread(target=work, name="picture-switch", daemon=True).start()
 
+    def _background_wifi_live(self) -> bool:
+        if self._parked is None or self._parked_frame_at is None:
+            return False
+        return background_wifi_is_live(time.monotonic() - self._parked_frame_at)
+
     def _start_switched_picture(self):
         if self._closing:
             self._switching = False
             return
+        if self._adopt_parked:
+            self._adopt_parked = False
+            self._switching = False
+            if self._switch_again:
+                self._switch_again = False
+                self._restart_picture()
+            return
+        self._adopt_parked = False
         self.rx = self._open_receiver()
         self._update_target()
         self.rx.start()

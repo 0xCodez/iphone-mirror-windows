@@ -12,11 +12,17 @@ import http.client
 import json
 import logging
 import threading
+import time
 import urllib.parse
 
 log = logging.getLogger(__name__)
 
 INVALID_SESSION = "invalid session id"
+# A brand-new session's application element is not ready on the first answer.
+# On this phone it became ready at about 8 seconds, so a short retry gives up
+# and the letter never leaves. Ask again until this wait is over.
+SIZE_RETRY_S = 0.5
+SIZE_WAIT_S = 12.0
 
 # HID usage of the Home button (consumer page, "Menu"), for /wda/performIoHidEvent
 HID_PAGE_CONSUMER, HID_USAGE_HOME = 0x0C, 0x40
@@ -39,6 +45,14 @@ class WDAError(Exception):
         # W3C WDA: HTTP 404 + "invalid session id"; a bare 404 without a JSON error means the
         # session part of the path was not recognised either.
         return self.error == INVALID_SESSION or (self.status == 404 and not self.error)
+
+
+def _size_not_ready(err):
+    """True while a new session has no screen yet. A real error is not retried."""
+    if err.error == "stale element reference":
+        return True
+    text = str(err)
+    return "connection closed" in text or "connection lost" in text
 
 
 def describe_error(e):
@@ -179,13 +193,35 @@ class WDA:
     def window_size(self, refresh=False):
         """Screen size in points for the current orientation (cached; refresh=True re-reads it)."""
         if self.size is None or refresh:
-            v = self._session("GET", "/window/size").get("value")
-            v = v if isinstance(v, dict) else {}
-            size = (float(v.get("width") or 0), float(v.get("height") or 0))
-            if not all(size):
-                raise WDAError("could not read the screen size")
-            self.size = size
+            self.size = self._read_size()
         return self.size
+
+    def _read_size(self):
+        # A new session answers /window/size with a stale element, then the
+        # connection drops, until the phone's screen is actually there.
+        # Opening another session starts that wait over.
+        deadline = time.monotonic() + SIZE_WAIT_S
+        last = None
+        while True:
+            try:
+                return self._size_value()
+            except WDAError as e:
+                if not _size_not_ready(e):
+                    raise
+                last = e
+                if time.monotonic() >= deadline:
+                    break
+                log.info("screen size not ready yet, asking this session again")
+                time.sleep(SIZE_RETRY_S)
+        raise last
+
+    def _size_value(self):
+        v = self._session("GET", "/window/size").get("value")
+        v = v if isinstance(v, dict) else {}
+        size = (float(v.get("width") or 0), float(v.get("height") or 0))
+        if not all(size):
+            raise WDAError("could not read the screen size")
+        return size
 
     # ------------------------------------------------------------------ gestures (points)
     def _pointer(self, steps):

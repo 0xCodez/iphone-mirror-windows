@@ -1,19 +1,28 @@
 # iPhone Mirror for Windows
 
-iPhone Mirror turns a Windows PC into an AirPlay screen-mirroring receiver and shows your
-iPhone in a frameless, rounded, iPhone-shaped window that floats on top of your other apps,
-much like "iPhone Mirroring" on macOS. Picture and sound come over Wi-Fi with nothing to
-install on the phone. If you also connect the iPhone with a cable once and set up
-WebDriverAgent, you can control it from the PC with your mouse and keyboard.
+One floating iPhone window. Two pictures, one set of gestures. The window picks the control
+stack from the picture that is showing. You do not pick a control mode.
 
-This copy also draws the phone over the USB cable in the same window. Modified from
-0xCodez/iphone-mirror-windows in November 2026. Read [docs/WINDOWS.md](docs/WINDOWS.md)
-before the rest of this file. The sections below still describe the original AirPlay app
-and do not match every control in this copy.
+- **Cable picture.** Plug in for the sharp picture. Taps, drags, and scrolling go through
+  the cable. Typing uses the helper. This picture needs iOS 27 or later. Unplugging stops
+  it and leaves the window on Unplugged. It does not jump to Screen Mirroring.
+- **Screen Mirroring.** Choose it when you want sound. Every gesture uses the helper, at
+  the phone's Wi-Fi address. Same clicks as the cable, slower. Unplugging leaves this
+  picture up.
 
-In this copy the top bar has a lock, not the old hand button. Leave the lock open and the
-helper starts when a picture is showing. `control.bat start` does the same. The cable
-picture needs iOS 27 or later.
+The helper is WebDriverAgent. Set it up once with Sideloadly (below). After that, leave
+the lock open and the window starts it. A free Apple ID signature lasts about 7 days, then
+Sideloadly has to sign it again. Do not use the Microsoft Store "Apple Devices" app. It
+does not see the phone over Wi-Fi. Sideloadly needs iTunes and iCloud from apple.com.
+
+The helper starts over Wi-Fi, so it can keep answering after the cable comes out.
+On 12 Nov 2026 it was still answering with the cable unplugged. If it fails, the lock
+turns red and its tooltip says why.
+
+Modified from 0xCodez/iphone-mirror-windows in November 2026. The detail is in
+[docs/WINDOWS.md](docs/WINDOWS.md). The sections below are the original setup. Where they
+say "hand button" or "Ctrl+U to turn control on," this copy uses the lock, and the helper
+starts on its own.
 
 ## Features
 
@@ -151,8 +160,8 @@ smooth scrolling with a touchpad resizes smoothly too.
 | Open Log | Open `%LOCALAPPDATA%\iPhoneMirror\iphone_mirror.log` |
 | Quit | Exit the app |
 
-If the controller reports an error, the app shows it in a non-blocking message box titled
-**"iPhone control"** with the full text, and the status also appears in the top bar label.
+If the helper fails, the lock turns red. Hover it for the reason. The top bar does not
+carry that error. On Screen Mirroring, a missing phone does not tell you to plug in.
 
 ## USB control (optional)
 
@@ -209,12 +218,9 @@ environment).
    while WDA starts (the first time also downloads and mounts the Developer Disk Image, which
    can take a minute) and turns green when it is ready.
 
-WebDriverAgent listens on port 8100 of the iPhone, and that port is reachable over Wi-Fi as
-well as through the USB forward. When you turn control on, the app first looks for a WDA
-that is already running, both on the USB forward and on the iPhone's Wi-Fi address, and only
-starts a new one over USB if it finds none. So once WDA is up, control traffic can go over
-Wi-Fi too. Keep the cable connected anyway while you work: WDA lives only as long as the test
-session that launched it, and unplugging the cable usually ends that session.
+WebDriverAgent listens on port 8100 of the iPhone. The window starts it over Wi-Fi when
+the phone is on this network, and uses the cable only when that address is missing.
+On 12 Nov 2026 the helper was still answering after the cable was unplugged.
 
 ### Helper commands
 

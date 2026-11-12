@@ -34,6 +34,13 @@ def setup_logging():
         sh.setFormatter(fmt)
         root.addHandler(sh)
     logging.getLogger("zeroconf").setLevel(logging.WARNING)
+    try:
+        import faulthandler
+
+        # A native crash (the window vanishing with no Python error) writes its stack here.
+        faulthandler.enable(open(LOG_FILE.with_name("iphone_mirror_fault.log"), "w", encoding="utf-8"), all_threads=True)
+    except OSError:
+        pass
 
 
 def parse_args():
@@ -64,6 +71,23 @@ def windows_taskbar_id():
         logging.getLogger(__name__).warning("could not set the Windows taskbar icon id")
 
 
+def _preload_usb():
+    """Load Apple's USB library on this thread, before the window pumps messages.
+
+    The first import pulls in pywin32. Doing that on the picture thread while the
+    window is opening makes Windows reject the call (0x8001010d) and the window dies.
+    """
+    try:
+        import win32security  # noqa: F401  # pywin32. First import must happen on this thread.
+
+        from pymobiledevice3.osu.os_utils import OsUtils
+
+        OsUtils.create()
+        from pymobiledevice3.usbmux import list_devices  # noqa: F401
+    except Exception:
+        logging.getLogger(__name__).warning("usb library did not load", exc_info=True)
+
+
 def main():
     windows_taskbar_id()
     args = parse_args()
@@ -75,6 +99,7 @@ def main():
         net.PORT = args.port
     setup_logging()
     app = QApplication(sys.argv[:1])
+    _preload_usb()
     app.setApplicationName("iPhone Mirror")
     app.setQuitOnLastWindowClosed(False)
     app.setWindowIcon(app_icon())
@@ -103,13 +128,22 @@ def main():
 
     def open_receiver():
         mode = "wifi" if args.local else picture_mode(settings, force_usb=args.usb)
-        on_frame = lambda arr, w, h: bridge.frame.emit(arr, w, h)
-        on_event = lambda e, info: bridge.event.emit(e, info)
-        if mode == "wifi":
-            return Receiver(settings, on_frame=on_frame, on_event=on_event)
-        from .usbvideo import UsbReceiver
+        box = {}
 
-        return UsbReceiver(settings, on_frame, on_event, require_usb=(mode == "cable"))
+        def on_frame(arr, w, h, _box=box):
+            bridge.frame.emit(_box.get("rx"), arr, w, h)
+
+        def on_event(e, info, _box=box):
+            bridge.event.emit(_box.get("rx"), e, info)
+
+        if mode == "wifi":
+            rx = Receiver(settings, on_frame=on_frame, on_event=on_event)
+        else:
+            from .usbvideo import UsbReceiver
+
+            rx = UsbReceiver(settings, on_frame, on_event, require_usb=(mode == "cable"))
+        box["rx"] = rx
+        return rx
 
     win._open_receiver = open_receiver
     rx = open_receiver()
@@ -123,7 +157,9 @@ def main():
         instance.newConnection.connect(lambda: (instance.nextPendingConnection(), win._show_front()))
     win.show()
     win._update_target()
-    rx.start()
+    # Start the cable check on the next turn. Starting it during the open
+    # message makes Apple's USB call fail and the window closes.
+    QTimer.singleShot(0, rx.start)
     if args.control:
         ctrl.start()
     if args.grab:
@@ -148,9 +184,11 @@ def main():
     if ctrl.state != OFF:
         ctrl.stop()
     win._closing = True
-    live = win.rx or rx
-    if live is not None:
-        live.stop()
+    stopped = set()
+    for live in (win.rx, getattr(win, "_parked", None), rx):
+        if live is not None and live not in stopped:
+            stopped.add(live)
+            live.stop()
     logging.info("exit")
     return code
 

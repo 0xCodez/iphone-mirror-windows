@@ -499,8 +499,33 @@ class Receiver:
         self.decoder.stop()
         if self.loop and self.loop.is_running():
             async def shutdown():
-                if self._server:
+                # Close the phone's video socket before the loop dies. Stopping
+                # the loop first leaves that socket open, so the window keeps
+                # the last frame and the phone will not start a new session.
+                owner = self._mirror_owner
+                if owner is not None:
+                    try:
+                        await asyncio.wait_for(owner.cleanup(), timeout=1)
+                    except Exception:
+                        log.exception("mirror close failed")
+                    writer = getattr(owner, "writer", None)
+                    if writer is not None:
+                        try:
+                            writer.close()
+                        except Exception:
+                            pass
+                current = asyncio.current_task()
+                tasks = [t for t in asyncio.all_tasks(self.loop) if t is not current and not t.done()]
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                if self._server is not None:
                     self._server.close()
+                    try:
+                        await self._server.wait_closed()
+                    except Exception:
+                        pass
                 self.loop.stop()
 
             asyncio.run_coroutine_threadsafe(shutdown(), self.loop)
