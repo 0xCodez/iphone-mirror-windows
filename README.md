@@ -2,7 +2,7 @@
 
 One floating iPhone window. Plug in for the sharp picture. Choose Screen Mirroring when you want sound. Both pictures use the same gestures.
 
-This is a working copy of [0xCodez/iphone-mirror-windows](https://github.com/0xCodez/iphone-mirror-windows), changed in November 2026. The cable picture is new. The click helper starts on its own. The notes for this copy are in [docs/WINDOWS.md](docs/WINDOWS.md).
+This builds on [0xCodez/iphone-mirror-windows](https://github.com/0xCodez/iphone-mirror-windows). The cable picture is new. The click helper starts on its own. The behavior notes are in [docs/WINDOWS.md](docs/WINDOWS.md).
 
 ## What you need
 
