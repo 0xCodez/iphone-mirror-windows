@@ -3,6 +3,7 @@
 No iPhone needed: a mock WebDriverAgent server runs on 127.0.0.1 and pymobiledevice3
 calls are replaced by fakes. Run:  python tests/test_wda.py
 """
+import asyncio
 import contextlib
 import importlib.util
 import io
@@ -26,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from iphone_mirror import control  # noqa: E402
 from iphone_mirror.control import ERROR, OFF, READY, STARTING, Controller, usb  # noqa: E402
 from iphone_mirror.control import __main__ as cli  # noqa: E402
+from iphone_mirror.control import wifi_wda  # noqa: E402
 from iphone_mirror.control.wda import WDA, WDAError  # noqa: E402
 
 
@@ -41,6 +43,7 @@ class MockWDA:
         self.sessions = 0
         self.expire_next = False  # answer the next session request with 404 "invalid session id"
         self.fail = {}  # session sub-path -> (HTTP status, W3C error), answered once
+        self.fail_repeat = {}  # session sub-path -> (remaining, HTTP status, W3C error)
         self.drop_next = False  # close the connection without answering, once
         self.status_value = {"ready": True, "ios": {"ip": "10.0.0.2"}}
         self.dead = False
@@ -99,6 +102,11 @@ class MockWDA:
                     self.expire_next = False
                     self.session = None  # WDA forgot the session (e.g. it was restarted)
                     return 404, {"value": {"error": "invalid session id", "message": "Session does not exist"}}
+                if rest in self.fail_repeat:
+                    left, status, err = self.fail_repeat[rest]
+                    if left > 0:
+                        self.fail_repeat[rest] = (left - 1, status, err)
+                        return status, {"value": {"error": err, "message": "mock failure"}}
                 if rest in self.fail:
                     status, err = self.fail.pop(rest)
                     return status, {"value": {"error": err, "message": "mock failure"}}
@@ -254,6 +262,35 @@ class WDAClientTests(unittest.TestCase):
         self.wda.press_button("volumeUp")
         method, path, body = self.mock.find("POST", "/wda/pressButton")[-1]
         self.assertEqual((path, body), ("/session/S1/wda/pressButton", {"name": "volumeUp"}))
+
+    def test_window_size_retries_same_session_after_stale_element(self):
+        self.wda.new_session()
+        self.mock.fail["/window/size"] = (404, "stale element reference")
+        with mock.patch("iphone_mirror.control.wda.SIZE_RETRY_S", 0):
+            self.assertEqual(self.wda.window_size(), (390.0, 844.0))
+        self.assertEqual(self.wda.session_id, "S1")
+        self.assertEqual(self.mock.sessions, 1)
+        self.assertEqual(len(self.mock.find("GET", "/window/size")), 2)
+
+    def test_window_size_asks_until_the_element_is_ready(self):
+        self.wda.new_session()
+        self.mock.fail_repeat["/window/size"] = (2, 404, "stale element reference")
+        with mock.patch("iphone_mirror.control.wda.SIZE_RETRY_S", 0):
+            self.assertEqual(self.wda.window_size(), (390.0, 844.0))
+        self.assertEqual(self.wda.session_id, "S1")
+        self.assertEqual(len(self.mock.find("GET", "/window/size")), 3)
+
+    def test_window_size_stops_when_the_wait_is_over(self):
+        self.wda.new_session()
+        self.mock.fail_repeat["/window/size"] = (8, 404, "stale element reference")
+        with mock.patch("iphone_mirror.control.wda.SIZE_RETRY_S", 0), mock.patch(
+            "iphone_mirror.control.wda.SIZE_WAIT_S", 0
+        ):
+            with self.assertRaises(WDAError) as cm:
+                self.wda.window_size()
+        self.assertEqual(cm.exception.error, "stale element reference")
+        self.assertEqual(self.wda.session_id, "S1")
+        self.assertEqual(len(self.mock.find("GET", "/window/size")), 1)
 
     def test_session_recreated_after_invalid_session(self):
         self.wda.tap(1, 1)
@@ -699,6 +736,7 @@ class UsbTests(unittest.TestCase):
             spawned.append((name, list(args)))
 
         with mock.patch.object(usb, "pmd3", fake_pmd3), \
+                mock.patch.object(usb, "phone_on_wifi", return_value=None), \
                 mock.patch.object(usb, "usbmuxd_reachable", return_value=True), \
                 mock.patch.object(usb, "free_port", return_value=18100), \
                 mock.patch.object(usb, "wda_ready", side_effect=lambda url, timeout=2.0: url is not None), \
@@ -719,6 +757,45 @@ class UsbTests(unittest.TestCase):
                 ("wda_forward", ["usbmux", "forward", "18100", "8100", "--udid", "UDID1"]),
             ])
 
+    def test_wifi_helper_is_used_when_the_phone_is_on_the_lan(self):
+        spawned = []
+
+        def fake_spawn(session, name, argv, cwd=None):
+            spawned.append((name, list(argv), cwd))
+
+        ready = {"n": 0}
+
+        def fake_ready(url, timeout=2.0):
+            ready["n"] += 1
+            return ready["n"] > 1
+
+        with mock.patch.object(usb, "phone_on_wifi", return_value="10.0.0.8"), \
+                mock.patch.object(usb, "wda_ready", fake_ready), \
+                mock.patch.object(usb.UsbSession, "_spawn_argv", fake_spawn), \
+                mock.patch.object(usb, "pmd3", side_effect=AssertionError("usb")):
+            url = usb.UsbSession().bring_up()
+        self.assertEqual(url, "http://10.0.0.8:8100")
+        self.assertEqual(spawned[0][0], "wda_runner")
+        self.assertEqual(spawned[0][1][1:], ["-m", "iphone_mirror.control.wifi_wda"])
+        self.assertTrue(spawned[0][2].endswith("iphone-mirror"))
+
+    def test_running_wifi_helper_is_reused(self):
+        with mock.patch.object(usb, "phone_on_wifi", return_value="10.0.0.8"), \
+                mock.patch.object(usb, "wda_ready", return_value=True), \
+                mock.patch.object(usb.UsbSession, "_spawn_argv", side_effect=AssertionError("spawn")), \
+                mock.patch.object(usb, "pmd3", side_effect=AssertionError("usb")):
+            url = usb.UsbSession().bring_up()
+        self.assertEqual(url, "http://10.0.0.8:8100")
+
+    def test_a_wifi_failure_does_not_start_over_the_cable(self):
+        with mock.patch.object(usb, "phone_on_wifi", return_value="10.0.0.8"), \
+                mock.patch.object(usb.UsbSession, "_over_wifi", side_effect=usb.UsbError("helper quit")), \
+                mock.patch.object(usb, "list_devices", return_value=[{"Identifier": "UDID1"}]), \
+                mock.patch.object(usb, "pmd3", side_effect=AssertionError("cable mount")):
+            with self.assertRaises(usb.UsbError) as caught:
+                usb.UsbSession().bring_up()
+        self.assertIn("helper quit", str(caught.exception))
+
     def test_close_cancels_bring_up(self):
         def slow_pmd3(*args, timeout=60, cancel=None):
             if cancel.wait(10):
@@ -727,7 +804,9 @@ class UsbTests(unittest.TestCase):
 
         session = usb.UsbSession()
         result = []
-        with mock.patch.object(usb, "pmd3", slow_pmd3), mock.patch.object(usb, "usbmuxd_reachable", return_value=True):
+        with mock.patch.object(usb, "pmd3", slow_pmd3), \
+                mock.patch.object(usb, "phone_on_wifi", return_value=None), \
+                mock.patch.object(usb, "usbmuxd_reachable", return_value=True):
             t = threading.Thread(target=lambda: result.append(self._catch(session.bring_up)))
             t.start()
             time.sleep(0.2)
@@ -782,6 +861,30 @@ class UsbTests(unittest.TestCase):
         for args, p in procs:
             _, err = p.communicate(timeout=120)
             self.assertEqual(p.returncode, 0, f"pymobiledevice3 {' '.join(args)}: {err.decode(errors='replace')[-400:]}")
+
+
+class WifiHelperTests(unittest.TestCase):
+    def test_one_empty_browse_is_not_the_end(self):
+        calls = {"n": 0}
+
+        async def browse():
+            calls["n"] += 1
+            return [] if calls["n"] == 1 else ["svc"]
+
+        result = asyncio.run(wifi_wda.pairing_services(browse, pause=0))
+        self.assertEqual(result, ["svc"])
+        self.assertEqual(calls["n"], 2)
+
+    def test_three_empty_browses_stop(self):
+        calls = {"n": 0}
+
+        async def browse():
+            calls["n"] += 1
+            return []
+
+        result = asyncio.run(wifi_wda.pairing_services(browse, pause=0))
+        self.assertEqual(result, [])
+        self.assertEqual(calls["n"], 3)
 
 
 # ---------------------------------------------------------------------- command line
@@ -853,7 +956,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("[OK]   pymobiledevice3", out)
         self.assertIn("[FAIL] Apple's USB service", out)
-        self.assertIn("Apple Devices", out)
+        self.assertIn("iTunes and iCloud from apple.com", out)
         self.assertIn(f"[OK]   WebDriverAgent answers at {self.mock.url} (iPhone Wi-Fi address 10.0.0.2)", out)
 
     def test_doctor_all_good(self):

@@ -1,12 +1,12 @@
-"""Bring up WebDriverAgent on a USB-connected iPhone with pymobiledevice3.
+"""Bring up WebDriverAgent with pymobiledevice3.
 
-Steps (each is a pymobiledevice3 CLI call, run in the background without a console):
-  1. find the iPhone through Apple's usbmuxd (installed by the "Apple Devices" app)
+The phone's Wi-Fi address is tried first. These cable steps run only when that
+address is missing:
+  1. find the iPhone through usbmuxd
   2. check Developer Mode
-  3. mount the Developer Disk Image (downloaded/personalised automatically)
-  4. find the installed WebDriverAgent runner and launch it as an XCUITest
-     (iOS 17.4+: through a userspace tunnel, no admin rights needed)
-  5. forward a local TCP port to WDA's port 8100 on the phone
+  3. mount the Developer Disk Image
+  4. launch the installed WebDriverAgent runner
+  5. forward a local port to WDA on the phone
 """
 import io
 import json
@@ -27,6 +27,24 @@ from .wda import WDA, WDAError, describe_error
 
 log = logging.getLogger(__name__)
 
+
+def com_mta():
+    """Make this thread a COM multithreaded apartment.
+
+    Qt's thread is single-threaded. Apple's USB service is COM. Calling it from
+    the picture thread without this bounces back into the window while it is
+    opening and kills the process (0x8001010d, then sometimes a graphics fault).
+    """
+    if sys.platform != "win32":
+        return
+    import ctypes
+
+    ole32 = ctypes.windll.ole32
+    ole32.CoInitializeEx.restype = ctypes.c_long
+    hr = ole32.CoInitializeEx(None, 0) & 0xFFFFFFFF  # COINIT_MULTITHREADED
+    if hr not in (0, 1):  # S_OK, or S_FALSE when this thread already initialized
+        log.info("COM apartment init returned 0x%08x", hr)
+
 WDA_PORT = 8100
 WDA_RELEASE_URL = "https://github.com/appium/WebDriverAgent/releases/latest/download/WebDriverAgentRunner-Runner.zip"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -34,8 +52,9 @@ USBMUXD_WINDOWS = ("127.0.0.1", 27015)  # Apple Mobile Device Service
 
 MSG_NO_USBMUXD = (
     "Apple's USB service (usbmuxd) is not running.\n"
-    "Install \"Apple Devices\" from the Microsoft Store (or iTunes), connect the iPhone "
-    "with a cable and tap \"Trust\" on the phone."
+    "Install iTunes and iCloud from apple.com. Sideloadly needs both.\n"
+    "The Microsoft Store \"Apple Devices\" app does not find the phone over Wi-Fi.\n"
+    "Then connect the iPhone with a cable and tap \"Trust\"."
 )
 MSG_NO_DEVICE = "No iPhone found on USB. Connect it with a cable, unlock it and tap \"Trust\"."
 MSG_NOT_TRUSTED = (
@@ -287,17 +306,18 @@ def usbmuxd_reachable(timeout=1.5):
 
 # ---------------------------------------------------------------------- device queries
 def list_devices(cancel=None):
-    """iPhones on USB: dicts with Identifier, DeviceName, ProductVersion, ProductType, ..."""
+    """iPhones on the cable. Wi-Fi discovery is phone_on_wifi, not usbmux."""
     if not usbmuxd_reachable():
         raise UsbError(MSG_NO_USBMUXD)
-    code, out, err = pmd3("usbmux", "list", "--usb", timeout=30, cancel=cancel)
+    args = ["usbmux", "list", "--usb"]
+    code, out, err = pmd3(*args, timeout=30, cancel=cancel)
     if code == 0:
         devices = _json(out)
         return [d for d in devices if isinstance(d, dict)] if isinstance(devices, list) else []
     hint = explain(err)
     if hint is None:
         # reading the device details needs lockdown; is there a device at all?
-        code2, out2, _ = pmd3("usbmux", "list", "--usb", "--simple", timeout=30, cancel=cancel)
+        code2, out2, _ = pmd3(*args, "--simple", timeout=30, cancel=cancel)
         udids = _json(out2) if code2 == 0 else None
         if isinstance(udids, list) and any(isinstance(u, str) for u in udids):
             hint = MSG_NOT_TRUSTED
@@ -372,11 +392,14 @@ class UsbSession:
         self.ios = (0, 0)
         self.bundle = None
         self.local_port = None
+        self._wifi_base = None
         self._closed = threading.Event()
         self._lock = threading.Lock()
 
     @property
     def base_url(self):
+        if self._wifi_base:
+            return self._wifi_base
         port = self.local_port
         return f"http://127.0.0.1:{port}" if port else None
 
@@ -386,6 +409,18 @@ class UsbSession:
 
     def bring_up(self, progress=lambda msg: None, wait=90):
         cancel = self._closed
+        ip = phone_on_wifi(cancel=cancel)
+        if ip:
+            try:
+                return self._over_wifi(ip, progress, wait, cancel)
+            except Cancelled:
+                raise
+            except UsbError:
+                # The phone is already on the LAN. A miss here is a Wi-Fi failure,
+                # not a reason to mount the developer image over the cable.
+                if cancel.is_set():
+                    raise Cancelled() from None
+                raise
         progress("Looking for the iPhone on USB...")
         devices = list_devices(cancel=cancel)
         if not devices:
@@ -435,6 +470,29 @@ class UsbSession:
         text = self.read_log("wda_runner")
         raise UsbError(explain(text) or MSG_WDA_TIMEOUT + "\n" + _tail(text))
 
+    def _over_wifi(self, ip, progress, wait, cancel):
+        """Start the helper on the phone's Wi-Fi address, or use one that is already answering."""
+        url = f"http://{ip}:{WDA_PORT}"
+        if wda_ready(url, timeout=1.5):
+            log.info("WebDriverAgent already running at %s", url)
+            self._wifi_base = url
+            return url
+        progress("Starting the helper over Wi-Fi...")
+        root = str(Path(__file__).resolve().parents[2])
+        self._spawn_argv("wda_runner", [_python(), "-m", "iphone_mirror.control.wifi_wda"], cwd=root)
+        deadline = time.monotonic() + wait
+        while True:
+            if wda_ready(url):
+                self._wifi_base = url
+                return url
+            self.check()
+            if time.monotonic() > deadline:
+                break
+            if cancel.wait(1):
+                raise Cancelled()
+        text = self.read_log("wda_runner")
+        raise UsbError(explain(text) or "The helper did not start over Wi-Fi.\n" + _tail(text))
+
     def check(self):
         """Raise UsbError if the session was closed or one of its processes has exited."""
         if self._closed.is_set():
@@ -470,6 +528,52 @@ class UsbSession:
                 raise UsbError(f"Could not start pymobiledevice3: {describe_error(e)}") from None
             self.procs.append((name, p, logf))
 
+    def _spawn_argv(self, name, argv, cwd=None):
+        """Start a child from a full command. Unlike _spawn, this does not wrap pymobiledevice3."""
+        with self._lock:
+            if self._closed.is_set():
+                raise Cancelled()
+            APP_DIR.mkdir(parents=True, exist_ok=True)
+            logf = open(self.log_path(name), "w", encoding="utf-8", errors="replace")
+            logf.write(" ".join(argv) + "\n")
+            logf.flush()
+            log.info("spawn %s: %s", name, " ".join(argv))
+            env = _child_env()
+            root = cwd or ""
+            if root:
+                env["PYTHONPATH"] = root + os.pathsep + env.get("PYTHONPATH", "")
+            try:
+                p = subprocess.Popen(
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    stdout=logf,
+                    stderr=subprocess.STDOUT,
+                    creationflags=NO_WINDOW,
+                    env=env,
+                    cwd=cwd,
+                )
+            except OSError as e:
+                logf.close()
+                raise UsbError(f"Could not start the helper: {describe_error(e)}") from None
+            _tie_to_job(p)
+            self.procs.append((name, p, logf))
+
+    def _stop_children(self):
+        with self._lock:
+            procs, self.procs = self.procs, []
+        for _, p, _ in procs:
+            if p.poll() is None:
+                try:
+                    p.terminate()
+                except OSError:
+                    pass
+        for _, p, logf in procs:
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _kill(p)
+            logf.close()
+
     def close(self):
         with self._lock:
             self._closed.set()
@@ -487,6 +591,20 @@ class UsbSession:
                 _kill(p)
             logf.close()
         self.local_port = None
+        self._wifi_base = None
+
+
+def phone_on_wifi(cancel=None, timeout=4.0):
+    """IPv4 of an iPhone on this LAN, or None. Raises Cancelled if the session is already closed."""
+    if cancel is not None and cancel.is_set():
+        raise Cancelled()
+    try:
+        from .wifi_wda import find_phone_ipv4
+
+        return find_phone_ipv4(timeout)
+    except Exception:
+        log.info("no iPhone on Wi-Fi", exc_info=True)
+        return None
 
 
 def xcuitest_args(bundle, udid, ios=(0, 0)):
@@ -511,6 +629,7 @@ def _ipa_member(name):
         or ".." in parts
         or parts[-1].startswith("._")
         or parts[-1] == ".DS_Store"
+        or any(part.endswith(".dSYM") for part in parts)
     )
 
 

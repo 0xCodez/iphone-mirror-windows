@@ -387,6 +387,7 @@ class Receiver:
         self._mirror_owner = None
         self._thread = None
         self._server = None
+        self._did_stop = False
 
     def emit(self, event, **info):
         try:
@@ -484,6 +485,9 @@ class Receiver:
         self.loop.call_soon_threadsafe(lambda: self.loop.run_in_executor(None, reannounce))
 
     def stop(self):
+        if self._did_stop:
+            return
+        self._did_stop = True
         logging.getLogger("asyncio").setLevel(logging.CRITICAL)  # pending accept tasks at exit are harmless
         if self.advertiser:
             try:
@@ -495,8 +499,33 @@ class Receiver:
         self.decoder.stop()
         if self.loop and self.loop.is_running():
             async def shutdown():
-                if self._server:
+                # Close the phone's video socket before the loop dies. Stopping
+                # the loop first leaves that socket open, so the window keeps
+                # the last frame and the phone will not start a new session.
+                owner = self._mirror_owner
+                if owner is not None:
+                    try:
+                        await asyncio.wait_for(owner.cleanup(), timeout=1)
+                    except Exception:
+                        log.exception("mirror close failed")
+                    writer = getattr(owner, "writer", None)
+                    if writer is not None:
+                        try:
+                            writer.close()
+                        except Exception:
+                            pass
+                current = asyncio.current_task()
+                tasks = [t for t in asyncio.all_tasks(self.loop) if t is not current and not t.done()]
+                for task in tasks:
+                    task.cancel()
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                if self._server is not None:
                     self._server.close()
+                    try:
+                        await self._server.wait_closed()
+                    except Exception:
+                        pass
                 self.loop.stop()
 
             asyncio.run_coroutine_threadsafe(shutdown(), self.loop)

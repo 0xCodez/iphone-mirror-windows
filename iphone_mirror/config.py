@@ -11,13 +11,16 @@ log = logging.getLogger(__name__)
 APP_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "iPhoneMirror"
 SETTINGS_FILE = APP_DIR / "settings.json"
 LOG_FILE = APP_DIR / "iphone_mirror.log"
+# Shown in Control Center. A computer name would identify the PC.
+PUBLIC_NAME = "PC"
 
 DEFAULTS = {
     # name shown on the iPhone in Control Center -> Screen Mirroring
     "name": "",
-    # resolution requested from the iPhone; the height controls the stream size
-    "width": 1920,
-    "height": 1080,
+    # resolution requested from the iPhone. Smaller than 1080p so the Wi-Fi
+    # stream stays close to live. The window is only a few hundred pixels wide.
+    "width": 720,
+    "height": 1560,
     "fps": 60,
     "audio": True,
     "always_on_top": True,
@@ -42,8 +45,9 @@ class Settings:
             except Exception as e:  # corrupt file: keep defaults, rewrite
                 log.warning("settings.json unreadable (%s), using defaults", e)
         changed = False
-        if not self.data.get("name"):
-            self.data["name"] = socket.gethostname() or "Windows PC"
+        chosen = receiver_name(self.data.get("name") or "", socket.gethostname())
+        if self.data.get("name") != chosen:
+            self.data["name"] = chosen
             changed = True
         if not self.data.get("mac"):
             mac = bytearray(secrets.token_bytes(6))
@@ -82,3 +86,38 @@ class Settings:
     @property
     def raop_prefix(self) -> str:  # AABBCCDDEEFF
         return self.mac_bytes.hex().upper()
+
+
+def receiver_name(saved, hostname) -> str:
+    """Name advertised to the iPhone. A blank name, or the computer's own name, becomes PC."""
+    host = (hostname or "").split(".")[0]
+    folded = (saved or "").casefold()
+    if not saved or folded == host.casefold() or folded == (hostname or "").casefold():
+        return PUBLIC_NAME
+    return saved
+
+
+def picture_mode(settings, force_usb=False) -> str:
+    """cable = fast picture over USB only, wifi = AirPlay. Missing and auto are cable."""
+    if force_usb:
+        return "cable"
+    if settings.get("picture") == "wifi":
+        return "wifi"
+    return "cable"
+
+
+def _picture_mode_check():
+    assert receiver_name("", "EXAMPLE-PC") == "PC"
+    assert receiver_name("EXAMPLE-PC", "example-pc") == "PC"
+    assert receiver_name("EXAMPLE-PC.local", "example-pc.local") == "PC"
+    assert receiver_name("Living Room", "EXAMPLE-PC") == "Living Room"
+    assert picture_mode({}) == "cable"
+    assert picture_mode({"backend": "usb"}) == "cable"
+    assert picture_mode({"picture": "auto"}) == "cable"
+    assert picture_mode({"picture": "cable", "backend": "usb"}) == "cable"
+    assert picture_mode({"picture": "wifi"}) == "wifi"
+    assert picture_mode({}, force_usb=True) == "cable"
+
+
+if __name__ == "__main__":
+    _picture_mode_check()

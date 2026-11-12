@@ -13,6 +13,10 @@ dist/
 # Logs
 *.log
 
+# Receiver identity. The app writes this under %LOCALAPPDATA%\iPhoneMirror.
+# A copy in the repo would contain the AirPlay key.
+settings.json
+
 # Sideloaded WebDriverAgent builds
 *.ipa
 

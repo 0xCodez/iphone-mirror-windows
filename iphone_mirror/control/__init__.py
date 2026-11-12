@@ -81,7 +81,7 @@ class Controller:
         self._lock = threading.RLock()
         self._run = None
         self._thread = None
-        self._scroll_carry = (0.0, 0.0)  # (notches not scrolled yet, time)
+        self._scroll_carry = (0.0, 0.0, "y")  # (notches not scrolled yet, time, axis)
         self._size_checked = 0.0  # time of the last orientation-driven size refresh
         self._serial = 0  # number of announced state changes
 
@@ -140,8 +140,11 @@ class Controller:
     def _main(self, run):
         wda = None
         try:
+            from .usb import com_mta
+
+            com_mta()
             self._set(STARTING, "Looking for WebDriverAgent...", run)
-            self._scroll_carry = (0.0, 0.0)
+            self._scroll_carry = (0.0, 0.0, "y")
             self._size_checked = 0.0
             url = self._find_running()
             if not url:
@@ -228,8 +231,8 @@ class Controller:
                 if kind == "type":
                     cmd = ("type", cmd[1] + nxt[1])
                     continue
-                if abs(nxt[1] - cmd[1]) < 0.05 and abs(nxt[2] - cmd[2]) < 0.05:
-                    cmd = ("scroll", cmd[1], cmd[2], cmd[3] + nxt[3])
+                if abs(nxt[1] - cmd[1]) < 0.05 and abs(nxt[2] - cmd[2]) < 0.05 and nxt[4:] == cmd[4:]:
+                    cmd = (cmd[0], cmd[1], cmd[2], cmd[3] + nxt[3], *cmd[4:])
                     continue
             held.append(nxt)
             return cmd
@@ -259,12 +262,12 @@ class Controller:
     def long_press(self, xf, yf):
         self._put("long", xf, yf)
 
-    def swipe(self, x1f, y1f, x2f, y2f, seconds):
-        self._put("swipe", x1f, y1f, x2f, y2f, seconds)
+    def swipe(self, x1f, y1f, x2f, y2f, seconds, hold_end=0.0):
+        self._put("swipe", x1f, y1f, x2f, y2f, seconds, hold_end)
 
-    def scroll(self, xf, yf, amount):
-        """amount in wheel notches; > 0 = wheel away from you = content moves down (finger drags down)."""
-        self._put("scroll", xf, yf, amount)
+    def scroll(self, xf, yf, amount, axis="y"):
+        """amount in wheel notches. y > 0 moves content down. x > 0 moves content right."""
+        self._put("scroll", xf, yf, amount, axis)
 
     def type_text(self, text):
         """'\\b' = backspace, '\\n' = return ('\\r' and '\\r\\n' are taken as return too)."""
@@ -312,7 +315,8 @@ class Controller:
             wda.long_press(px(a[0]), py(a[1]))
         elif kind == "swipe":
             ms = max(60, min(1500, a[4] * 1000))
-            wda.swipe(px(a[0]), py(a[1]), px(a[2]), py(a[3]), duration_ms=ms)
+            hold = int(a[5] * 1000) if len(a) > 5 else 0
+            wda.swipe(px(a[0]), py(a[1]), px(a[2]), py(a[3]), duration_ms=ms, hold_end_ms=hold)
         elif kind == "scroll":
             self._scroll(wda, w, h, *a)
         elif kind == "type":
@@ -326,27 +330,38 @@ class Controller:
         else:
             log.warning("unknown command %s", kind)
 
-    def _scroll(self, wda, w, h, xf, yf, notches):
+    def _scroll(self, wda, w, h, xf, yf, notches, axis="y"):
         now = time.monotonic()
-        carry, when = self._scroll_carry
-        if now - when > 1.0 or carry * notches < 0:
-            carry = 0.0  # stale, or the wheel changed direction
+        carry, when, old_axis = self._scroll_carry
+        if now - when > 1.0 or carry * notches < 0 or old_axis != axis:
+            carry = 0.0  # stale, the wheel changed direction, or the axis changed
         notches += carry
-        per_notch = SCROLL_PER_NOTCH * h
-        total = notches * per_notch  # points; > 0 = finger drags down
+        span = w if axis == "x" else h
+        per_notch = SCROLL_PER_NOTCH * span
+        total = notches * per_notch  # points; > 0 = finger drags down or right
         if abs(total) < SCROLL_MIN_PT:
-            self._scroll_carry = (notches, now)
+            self._scroll_carry = (notches, now, axis)
             return
-        x = min(max(xf * w, w * 0.08), w * 0.92)  # away from the edges (edge swipe = "back")
-        y = yf * h
-        for _ in range(SCROLL_MAX_STEPS):
-            if abs(total) < SCROLL_MIN_PT:
-                break
-            dy = max(-SCROLL_MAX_STEP * h, min(SCROLL_MAX_STEP * h, total))
-            y1 = min(max(y, h * 0.15 + max(0, -dy)), h * 0.85 - max(0, dy))
-            # the short pause before lifting the finger stops the scroll view from flinging,
-            # so one notch always scrolls the same distance
-            wda.swipe(x, y1, x, y1 + dy, duration_ms=150, hold_end_ms=60)
-            total -= dy
+        if axis == "x":
+            y = min(max(yf * h, h * 0.15), h * 0.85)
+            x = xf * w
+            for _ in range(SCROLL_MAX_STEPS):
+                if abs(total) < SCROLL_MIN_PT:
+                    break
+                dx = max(-SCROLL_MAX_STEP * w, min(SCROLL_MAX_STEP * w, total))
+                x1 = min(max(x, w * 0.12 + max(0, -dx)), w * 0.88 - max(0, dx))
+                wda.swipe(x1, y, x1 + dx, y, duration_ms=150, hold_end_ms=60)
+                total -= dx
+        else:
+            x = min(max(xf * w, w * 0.08), w * 0.92)  # away from the edges (edge swipe = "back")
+            y = yf * h
+            for _ in range(SCROLL_MAX_STEPS):
+                if abs(total) < SCROLL_MIN_PT:
+                    break
+                dy = max(-SCROLL_MAX_STEP * h, min(SCROLL_MAX_STEP * h, total))
+                y1 = min(max(y, h * 0.15 + max(0, -dy)), h * 0.85 - max(0, dy))
+                # the short pause before lifting the finger stops the scroll view from flinging
+                wda.swipe(x, y1, x, y1 + dy, duration_ms=150, hold_end_ms=60)
+                total -= dy
         rest = total / per_notch if abs(total) < SCROLL_MIN_PT else 0.0
-        self._scroll_carry = (rest, time.monotonic())
+        self._scroll_carry = (rest, time.monotonic(), axis)
