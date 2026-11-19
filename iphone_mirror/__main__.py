@@ -21,13 +21,13 @@ LOCAL_PORT = 7100  # --local self-tests must not collide with a normal instance 
 LOCAL_SETTINGS = APP_DIR / "settings-local.json"  # ... nor overwrite its settings
 
 
-def setup_logging():
+def setup_logging(debug=False):
     LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter("%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     fh = RotatingFileHandler(LOG_FILE, maxBytes=2_000_000, backupCount=2, encoding="utf-8")
     fh.setFormatter(fmt)
     root = logging.getLogger()
-    root.setLevel(logging.INFO)
+    root.setLevel(logging.DEBUG if debug else logging.INFO)
     root.addHandler(fh)
     if sys.stderr:
         sh = logging.StreamHandler()
@@ -48,6 +48,7 @@ def parse_args():
     p.add_argument("--control", action="store_true", help="start iPhone control (USB / WebDriverAgent) at launch")
     p.add_argument("--grab", metavar="DIR", help="self-test: save a PNG of the window every 2 s")
     p.add_argument("--quit-after", type=float, default=0, help="self-test: exit after N seconds")
+    p.add_argument("--debug", action="store_true", help="write DEBUG-level messages to the log file")
     return p.parse_args()
 
 
@@ -59,7 +60,7 @@ def main():
         net.PORT = LOCAL_PORT
     if args.port:
         net.PORT = args.port
-    setup_logging()
+    setup_logging(args.debug)
     app = QApplication(sys.argv[:1])
     app.setApplicationName("iPhone Mirror")
 

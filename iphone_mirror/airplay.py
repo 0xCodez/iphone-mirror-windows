@@ -23,6 +23,18 @@ def _bplist(obj) -> bytes:
     return plistlib.dumps(obj, fmt=plistlib.FMT_BINARY, sort_keys=False)
 
 
+def _describe_plist(obj, depth=0):
+    """Short summary of a request plist for DEBUG logs: scalars as-is, bytes as
+    their length only (they include the encrypted session key), containers recursively."""
+    if isinstance(obj, dict):
+        return {k: _describe_plist(v, depth + 1) for k, v in obj.items()} if depth < 4 else "{...}"
+    if isinstance(obj, list):
+        return [_describe_plist(v, depth + 1) for v in obj] if depth < 4 else "[...]"
+    if isinstance(obj, (bytes, bytearray)):
+        return f"<{len(obj)} bytes>"
+    return obj
+
+
 class Request:
     def __init__(self, method, url, protocol, headers, body):
         self.method, self.url, self.protocol = method, url, protocol
@@ -47,7 +59,8 @@ class Response:
 
 class _TimingProto(asyncio.DatagramProtocol):
     def datagram_received(self, data, addr):
-        pass  # replies are not needed: we render as soon as frames arrive
+        # replies are not needed: we render as soon as frames arrive
+        log.debug("timing reply from %s:%s (%d bytes)", addr[0], addr[1], len(data))
 
 
 class TimingSender:
@@ -274,6 +287,8 @@ class Connection:
     async def on_setup(self, req, resp):
         rx = self.rx
         plist = plistlib.loads(req.body) if req.body else {}
+        if log.isEnabledFor(logging.DEBUG):
+            log.debug("SETUP plist: %s", _describe_plist(plist))
         out = {}
         if "ekey" in plist and "eiv" in plist:
             self.client_name = plist.get("name") or "iPhone"

@@ -236,6 +236,19 @@ command for its options):
   either device can do the same.
 - Restart the app; it announces itself again with mDNS when it starts.
 
+**Stuck on "Connecting..."**
+
+Stop Screen Mirroring on the iPhone and connect again. If it keeps happening, quit the app,
+start it from the repository folder with debug logging, reproduce the problem and attach
+the log (right-click > **Open Log**) to an issue:
+
+```
+"%LOCALAPPDATA%\iPhoneMirror\venv\Scripts\pythonw.exe" -m iphone_mirror --debug
+```
+
+The debug log shows each SETUP request (without its key material) and the iPhone's timing
+replies.
+
 **"Could not decrypt the video"**
 
 Stop Screen Mirroring on the iPhone and connect again. If it keeps happening, open the log
