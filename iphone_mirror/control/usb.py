@@ -511,6 +511,7 @@ def _ipa_member(name):
         or ".." in parts
         or parts[-1].startswith("._")
         or parts[-1] == ".DS_Store"
+        or any(p.endswith(".dSYM") for p in parts)
     )
 
 

@@ -6,6 +6,10 @@ import plistlib
 import struct
 import threading
 import time
+import concurrent.futures
+from concurrent.futures import ThreadPoolExecutor
+
+concurrent.futures.ThreadPoolExecutor = ThreadPoolExecutor
 
 from . import discovery, net
 from .audio import AudioStream, Player
